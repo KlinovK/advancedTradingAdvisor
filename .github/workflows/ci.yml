@@ -36,3 +36,46 @@ jobs:
 
       - name: Check Ruff formatting
         run: .venv/bin/ruff format --check .
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: advisor_test
+          POSTGRES_USER: advisor_test
+          POSTGRES_PASSWORD: advisor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U advisor_test -d advisor_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create development environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install '.[dev]'
+
+      - name: Run PostgreSQL integration contracts
+        env:
+          ADVISOR_TEST_POSTGRES_URL: postgresql://advisor_test:advisor_test@127.0.0.1:5432/advisor_test
+        run: >-
+          .venv/bin/python -m pytest
+          -m postgres_integration
+          tests/test_postgres_storage.py

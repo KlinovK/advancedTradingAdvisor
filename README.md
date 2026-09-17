@@ -291,8 +291,11 @@ conditional updates and database constraints for leases, stale recovery, owner f
 idempotent scheduled slots and delivery attempt transitions. Provider/connection exception text
 is replaced with a fixed storage error; a database URL is never written to reports or state.
 
-Normal tests and CI remain credential-free and do not require PostgreSQL. To run the isolated
-integration contract against a dedicated disposable test database only:
+Normal local tests and the `offline-tests` CI job remain credential-free and do not require
+PostgreSQL. A separate `postgres-integration` CI job starts a disposable PostgreSQL 17 service
+with fixed test-only credentials, exposes `ADVISOR_TEST_POSTGRES_URL` only to the integration-test
+step, and uploads no database artifacts. To run the same isolated contract locally against a
+dedicated disposable test database only:
 
 ```sh
 ADVISOR_TEST_POSTGRES_URL='postgresql://test-only-url' \

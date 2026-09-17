@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import os
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -13,6 +14,7 @@ from advanced_trading_advisor.analysis.models import AnalysisRun, AnalysisRunSta
 from advanced_trading_advisor.cli.main import main
 from advanced_trading_advisor.delivery.models import DeliveryRecord, DeliveryStatus
 from advanced_trading_advisor.domain.persistence import (
+    ConfirmedUpdate,
     ConflictError,
     FailureCategory,
     PersistenceError,
@@ -26,6 +28,7 @@ from advanced_trading_advisor.portfolio.models import (
     Portfolio,
 )
 from advanced_trading_advisor.scheduler.models import ScheduledExecution, ScheduledStatus
+from advanced_trading_advisor.storage.codecs import PAYLOAD_VERSION, SnapshotCodec, UpdateCodec
 from advanced_trading_advisor.storage.database import Database
 from advanced_trading_advisor.storage.factory import create_storage
 from advanced_trading_advisor.storage.postgres_database import PostgresDatabase
@@ -201,6 +204,123 @@ def test_sqlite_only_operations_fail_before_postgres_connection(monkeypatch):
 TEST_POSTGRES_URL = os.environ.get("ADVISOR_TEST_POSTGRES_URL")
 
 
+@asynccontextmanager
+async def isolated_postgres_schema():
+    """Create test-only state under the dedicated integration URL and always remove it."""
+    try:
+        driver = importlib.import_module("asyncpg")
+        admin = await driver.connect(dsn=TEST_POSTGRES_URL, timeout=10)
+    except Exception as error:
+        pytest.fail(
+            f"Dedicated PostgreSQL test database is unavailable ({type(error).__name__}).",
+            pytrace=False,
+        )
+    schema = f"advisor_test_{uuid4().hex}"
+    scoped = None
+    try:
+        await admin.execute(f'CREATE SCHEMA "{schema}"')
+        scoped = await driver.connect(
+            dsn=TEST_POSTGRES_URL,
+            timeout=10,
+            server_settings={"search_path": schema},
+        )
+        yield scoped, schema
+    finally:
+        if scoped is not None:
+            await scoped.close()
+        try:
+            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        finally:
+            await admin.close()
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.skipif(
+    not TEST_POSTGRES_URL,
+    reason="ADVISOR_TEST_POSTGRES_URL is not configured",
+)
+def test_postgres_v1_migrates_to_v3_and_preserves_canonical_state():
+    async def scenario():
+        async with isolated_postgres_schema() as (connection, schema):
+            async with connection.transaction():
+                for statement in POSTGRES_MIGRATIONS[1]:
+                    await connection.execute(statement)
+                await connection.execute(
+                    "INSERT INTO schema_metadata(singleton_id,version) VALUES (1,1)"
+                )
+                first = pg_snapshot()
+                snapshot_payload = SnapshotCodec.encode(first)
+                update = ConfirmedUpdate(
+                    uuid4(), UpdateType.INITIAL_STATE, None, first.id, first.confirmed_at
+                )
+                update_payload = UpdateCodec.encode(update)
+                await connection.execute(
+                    """INSERT INTO portfolio_snapshots
+                       (snapshot_id,confirmed_at,payload_json,schema_version,created_at)
+                       VALUES ($1,$2,$3,$4,$5)""",
+                    first.id,
+                    first.confirmed_at,
+                    snapshot_payload,
+                    PAYLOAD_VERSION,
+                    first.confirmed_at,
+                )
+                await connection.execute(
+                    """INSERT INTO current_portfolio
+                       (singleton_id,snapshot_id,revision,updated_at) VALUES (1,$1,1,$2)""",
+                    first.id,
+                    first.confirmed_at,
+                )
+                await connection.execute(
+                    """INSERT INTO confirmed_updates
+                       (update_id,update_type,previous_snapshot_id,new_snapshot_id,
+                        confirmed_at,payload_json,schema_version)
+                       VALUES ($1,$2,NULL,$3,$4,$5,$6)""",
+                    update.update_id,
+                    update.update_type.value,
+                    update.new_snapshot_id,
+                    update.confirmed_at,
+                    update_payload,
+                    PAYLOAD_VERSION,
+                )
+
+            storage = create_storage(
+                StorageSettings(StorageBackend.POSTGRES, Path("ignored.sqlite"), TEST_POSTGRES_URL),
+                postgres_schema=schema,
+            )
+            await storage.initialize()
+            assert (
+                await connection.fetchval(
+                    "SELECT version FROM schema_metadata WHERE singleton_id=1"
+                )
+                == 3
+            )
+            tables = {
+                row["table_name"]
+                for row in await connection.fetch(
+                    """SELECT table_name FROM information_schema.tables
+                       WHERE table_schema=current_schema() AND table_type='BASE TABLE'"""
+                )
+            }
+            assert tables == set(POSTGRES_COLUMNS)
+            assert (
+                await connection.fetchval(
+                    "SELECT payload_json FROM portfolio_snapshots WHERE snapshot_id=$1", first.id
+                )
+                == snapshot_payload
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT payload_json FROM confirmed_updates WHERE update_id=$1",
+                    update.update_id,
+                )
+                == update_payload
+            )
+            assert (await storage.snapshots.get_current()).snapshot == first
+            assert await storage.confirmed_updates.list_recent() == (update,)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.postgres_integration
 @pytest.mark.skipif(
     not TEST_POSTGRES_URL,
@@ -208,14 +328,7 @@ TEST_POSTGRES_URL = os.environ.get("ADVISOR_TEST_POSTGRES_URL")
 )
 def test_postgres_repository_contracts_in_isolated_schema():
     async def scenario():
-        try:
-            driver = importlib.import_module("asyncpg")
-            admin = await driver.connect(dsn=TEST_POSTGRES_URL, timeout=10)
-        except Exception:
-            pytest.fail("Dedicated PostgreSQL test database is unavailable.", pytrace=False)
-        schema = f"advisor_test_{uuid4().hex}"
-        try:
-            await admin.execute(f'CREATE SCHEMA "{schema}"')
+        async with isolated_postgres_schema() as (connection, schema):
             storage = create_storage(
                 StorageSettings(StorageBackend.POSTGRES, Path("ignored.sqlite"), TEST_POSTGRES_URL),
                 postgres_schema=schema,
@@ -229,6 +342,9 @@ def test_postgres_repository_contracts_in_isolated_schema():
             assert current.revision == 1
             assert await storage.snapshots.get(first.id) == first
             assert len(await storage.confirmed_updates.list_recent()) == 1
+            assert await connection.fetchval(
+                "SELECT payload_json FROM portfolio_snapshots WHERE snapshot_id=$1", first.id
+            ) == SnapshotCodec.encode(first)
 
             candidates = [
                 replace(first, id=uuid4(), confirmed_at=NOW + timedelta(seconds=1))
@@ -250,12 +366,26 @@ def test_postgres_repository_contracts_in_isolated_schema():
             current = await storage.snapshots.get_current()
             assert current.revision == 2
             assert len(await storage.confirmed_updates.list_recent()) == 2
+            loser = candidates[
+                next(
+                    index
+                    for index, value in enumerate(outcomes)
+                    if isinstance(value, ConflictError)
+                )
+            ]
+            assert await storage.snapshots.get(loser.id) is None
 
-            run = AnalysisRun.start(current.snapshot.id, NOW + timedelta(seconds=2))
-            contender = AnalysisRun.start(current.snapshot.id, NOW + timedelta(seconds=3))
-            await storage.analyses.acquire(run)
-            with pytest.raises(ConflictError):
-                await storage.analyses.acquire(contender)
+            runs = (
+                AnalysisRun.start(current.snapshot.id, NOW + timedelta(seconds=2)),
+                AnalysisRun.start(current.snapshot.id, NOW + timedelta(seconds=3)),
+            )
+            acquisitions = await asyncio.gather(
+                *(storage.analyses.acquire(run) for run in runs),
+                return_exceptions=True,
+            )
+            assert sum(value is None for value in acquisitions) == 1
+            assert sum(isinstance(value, ConflictError) for value in acquisitions) == 1
+            run = runs[next(index for index, value in enumerate(acquisitions) if value is None)]
             completed = await storage.analyses.mark_completed(
                 run.run_id,
                 completed_at=NOW + timedelta(seconds=4),
@@ -289,14 +419,24 @@ def test_postgres_repository_contracts_in_isolated_schema():
             )
 
             cutoff = datetime(2026, 9, 17, 16, tzinfo=UTC)
-            slot = ScheduledExecution(
-                cutoff + timedelta(minutes=10),
-                cutoff,
-                uuid4(),
-                cutoff + timedelta(minutes=10),
+            slots = (
+                ScheduledExecution(
+                    cutoff + timedelta(minutes=10),
+                    cutoff,
+                    uuid4(),
+                    cutoff + timedelta(minutes=10),
+                ),
+                ScheduledExecution(
+                    cutoff + timedelta(minutes=10),
+                    cutoff,
+                    uuid4(),
+                    cutoff + timedelta(minutes=10),
+                ),
             )
-            assert await storage.scheduler.claim(slot)
-            assert not await storage.scheduler.claim(replace(slot, owner_token=uuid4()))
+            claims = await asyncio.gather(*(storage.scheduler.claim(slot) for slot in slots))
+            assert sorted(claims) == [False, True]
+            slot = slots[claims.index(True)]
+            assert not await storage.scheduler.claim(slot)
             failed = await storage.scheduler.finish(
                 slot,
                 slot.started_at + timedelta(seconds=1),
@@ -331,9 +471,15 @@ def test_postgres_repository_contracts_in_isolated_schema():
             delivery = DeliveryRecord(
                 uuid4(), completed.run.run_id, "a" * 64, NOW + timedelta(seconds=5)
             )
-            sending, active = await storage.deliveries.claim(delivery)
-            assert active and sending.status is DeliveryStatus.SENDING
+            delivery_claims = await asyncio.gather(
+                storage.deliveries.claim(delivery),
+                storage.deliveries.claim(replace(delivery, delivery_id=uuid4())),
+            )
+            assert sum(active for _, active in delivery_claims) == 1
+            sending = next(record for record, active in delivery_claims if active)
+            assert sending.status is DeliveryStatus.SENDING
             sending = await storage.deliveries.start_attempt(sending.delivery_id)
+            assert sending.attempt_count == 1
             delivered = await storage.deliveries.finish(
                 sending.delivery_id,
                 NOW + timedelta(seconds=6),
@@ -368,10 +514,10 @@ def test_postgres_repository_contracts_in_isolated_schema():
                         "UPDATE portfolio_snapshots SET payload_json='{}' WHERE snapshot_id=$1",
                         first.id,
                     )
-        finally:
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
+            with pytest.raises(PersistenceError):
+                async with database.transaction() as immutable:
+                    await immutable.execute(
+                        "DELETE FROM confirmed_updates WHERE new_snapshot_id=$1", first.id
+                    )
 
     asyncio.run(scenario())
