@@ -9,11 +9,7 @@ from advanced_trading_advisor.market.live import CoinGeckoMarketDataProvider
 from advanced_trading_advisor.market.settings import CoinGeckoSettings
 from advanced_trading_advisor.market.static import StaticMarketDataProvider
 from advanced_trading_advisor.scheduler.market import ScheduledMarketProvider
-from advanced_trading_advisor.storage.delivery import SQLiteDeliveryRepository
-from advanced_trading_advisor.storage.repositories import (
-    SQLiteAnalysisRunRepository,
-    SQLiteSnapshotRepository,
-)
+from advanced_trading_advisor.storage.factory import as_storage
 from advanced_trading_advisor.telegram.service import TelegramDeliveryService
 from advanced_trading_advisor.telegram.transport import TelegramTransport
 
@@ -21,7 +17,7 @@ from .report import render_analysis
 
 
 def compose_analysis(
-    db,
+    storage,
     *,
     now,
     provider_factory,
@@ -31,6 +27,7 @@ def compose_analysis(
     scheduled=None,
     sleep=asyncio.sleep,
 ):
+    storage = as_storage(storage)
     settings = OpenAISettings.from_environment(enabled=ai_override)
     reasoner = reasoner_factory(settings) if settings.enabled else None
 
@@ -57,8 +54,8 @@ def compose_analysis(
         )
 
     return AnalyzeCurrentPortfolio(
-        SQLiteSnapshotRepository(db),
-        SQLiteAnalysisRunRepository(db),
+        storage.snapshots,
+        storage.analyses,
         provider,
         now=now,
         reasoner=reasoner,
@@ -67,12 +64,13 @@ def compose_analysis(
     )
 
 
-def compose_delivery(db, settings, *, now, sleep=asyncio.sleep, sender_factory=None):
+def compose_delivery(storage, settings, *, now, sleep=asyncio.sleep, sender_factory=None):
+    storage = as_storage(storage)
     sender = sender_factory(settings) if sender_factory else TelegramTransport(settings)
     return TelegramDeliveryService(
         settings,
-        SQLiteDeliveryRepository(db),
-        SQLiteAnalysisRunRepository(db),
+        storage.deliveries,
+        storage.analyses,
         sender,
         now=now,
         sleep=sleep,

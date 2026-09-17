@@ -169,13 +169,36 @@ and a central numeric context are added. Static unknown symbols now fail explici
 The calculator requires normalized, ordered, valid, closed 4H candles. It verifies spacing;
 the live adapter establishes closure against an injected UTC clock before calculation.
 
-## Local persistence
+## Persistence backends
 
-SQLite is accessed through `aiosqlite` (tested with 0.22.1). Live HTTP uses `httpx` (0.28.1).
+SQLite remains the default local backend and is accessed through `aiosqlite` (tested with 0.22.1).
+PostgreSQL is an explicit alternative implemented with the native asyncio driver
+`asyncpg>=0.30,<1`; no ORM is used. Live HTTP uses `httpx` (0.28.1).
 Neutral async repository protocols live in `portfolio/repositories.py` and
-`analysis/repositories.py`. `storage/` implements them; domain models and the confirmed-state
-service never import SQLite. The core requires an explicit path; the CLI supplies the documented
-local default or a caller override.
+`analysis/repositories.py`, with equivalent scheduler and delivery protocols. `storage/`
+implements them; domain models and application services import neither SQLite nor PostgreSQL.
+The CLI selects a repository bundle once at startup.
+
+Storage configuration is loaded from the optional working-directory `.env`, then overridden by
+the real process environment:
+
+```dotenv
+ADVISOR_STORAGE_BACKEND=sqlite
+# ADVISOR_DATABASE_URL is required only for an explicit postgres backend.
+ADVISOR_DATABASE_URL=
+```
+
+`sqlite` is the backward-compatible default and continues to use `--db`, `ADVISOR_DB_PATH`, or
+`~/.advanced_trading_advisor/advisor.sqlite`. Selecting `postgres` requires a
+`postgres://`/`postgresql://` URL. The URL is excluded from settings/database representations and
+normal errors. Do not commit it. The local launchd installation needs no configuration change and
+continues to select SQLite. `advisor doctor`, `advisor backup`, and backup inspection remain
+explicitly SQLite-only and fail before connecting when PostgreSQL is selected.
+
+### SQLite
+
+The SQLite core requires an explicit path; the CLI supplies the documented local default or a
+caller override.
 
 Composition example inside an async function:
 
@@ -244,12 +267,42 @@ Phase 6 recovers expired runs before the next analysis, as documented below; it 
 Completed runs may contain optional result JSON of the form
 `{"schema_version":1,"data":{}}`. Phase 4 defines `AnalysisResultCodec` for completed reports; monetary values
 must be strings and JSON floating-point/non-finite numbers are rejected. Do not put credentials,
-raw provider responses or other secrets into results. The database is local, not encrypted;
-protect the caller-selected directory and backups appropriately.
+raw provider responses or other secrets into results. The local SQLite file is not encrypted;
+protect the caller-selected directory and backups appropriately. PostgreSQL transport and storage
+protection depend on its later deployment configuration and are not claimed by this phase.
 
 Tests use temporary file-backed databases and block network connections/DNS. They exercise
 reopening in a separate process, exact codecs, revision conflicts, transaction rollback,
 foreign keys, immutability and independent run lifecycles.
+
+### PostgreSQL infrastructure
+
+PostgreSQL schema metadata is also version 3. New empty schemas apply ordered v1→v3 migrations
+for portfolio/history, scheduler, then Telegram delivery storage. Relational identities use native
+UUID, indexed timestamps use `TIMESTAMPTZ`, and canonical versioned snapshot/update/result payloads
+remain `TEXT` so their exact encoding is preserved. Foreign keys, checks, uniqueness constraints,
+partial uniqueness for the single RUNNING analysis, and trigger guards protect immutable and
+terminal records at the database boundary.
+
+Confirmed portfolio transitions use one transaction containing an advisory lock, immutable
+snapshot insert, immutable audit insert and revision-checked current-pointer update. Analysis,
+scheduler and Telegram repositories combine transaction-scoped advisory locks, row locks,
+conditional updates and database constraints for leases, stale recovery, owner fencing,
+idempotent scheduled slots and delivery attempt transitions. Provider/connection exception text
+is replaced with a fixed storage error; a database URL is never written to reports or state.
+
+Normal tests and CI remain credential-free and do not require PostgreSQL. To run the isolated
+integration contract against a dedicated disposable test database only:
+
+```sh
+ADVISOR_TEST_POSTGRES_URL='postgresql://test-only-url' \
+  .venv/bin/python -m pytest -m postgres_integration tests/test_postgres_storage.py
+```
+
+The integration test creates a unique temporary schema and drops it afterward. It never falls
+back to `ADVISOR_DATABASE_URL`; do not point the dedicated test variable at production. Without
+that variable the test is explicitly skipped. Cloud PostgreSQL provisioning and migration of the
+existing local SQLite database are not implemented in this phase.
 
 ## Market data and cutoff
 

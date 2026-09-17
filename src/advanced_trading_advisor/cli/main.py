@@ -36,19 +36,14 @@ from advanced_trading_advisor.scheduler.models import ScheduledStatus
 from advanced_trading_advisor.scheduler.policy import SchedulerPolicy
 from advanced_trading_advisor.scheduler.service import Scheduler
 from advanced_trading_advisor.scheduler.settings import SchedulerSettings
-from advanced_trading_advisor.storage.database import Database
-from advanced_trading_advisor.storage.delivery import SQLiteDeliveryRepository
+from advanced_trading_advisor.storage.factory import create_storage
 from advanced_trading_advisor.storage.maintenance import (
     backup_database,
     check_schema,
     inspect_database,
     readonly,
 )
-from advanced_trading_advisor.storage.repositories import (
-    SQLiteAnalysisRunRepository,
-    SQLiteSnapshotRepository,
-)
-from advanced_trading_advisor.storage.scheduler import SQLiteSchedulerRepository
+from advanced_trading_advisor.storage.settings import StorageSettings
 from advanced_trading_advisor.telegram.settings import TelegramSettings
 from advanced_trading_advisor.telegram.transport import TelegramSendError
 
@@ -243,7 +238,11 @@ class CLI:
         self.telegram_sender_factory = telegram_sender_factory
 
     async def run(self, args):
-        db = Database(Path(args.db))
+        storage = create_storage(StorageSettings.from_environment(sqlite_path=Path(args.db)))
+        return await self._run(args, storage)
+
+    async def _run(self, args, storage):
+        db = storage.database
         if args.command == "telegram":
             environment = local_environment()
             if args.operation == "status":
@@ -251,11 +250,15 @@ class CLI:
                 token_configured = bool(environment.get("TELEGRAM_BOT_TOKEN"))
                 chat_configured = bool(environment.get("TELEGRAM_CHAT_ID"))
                 latest = None
-                if db.path.exists():
-                    async with readonly(db.path) as connection:
-                        version = await check_schema(connection)
-                    if version >= 3:
-                        latest = await SQLiteDeliveryRepository(db).latest()
+                if storage.is_sqlite:
+                    if db.path.exists():
+                        async with readonly(db.path) as connection:
+                            version = await check_schema(connection)
+                        if version >= 3:
+                            latest = await storage.deliveries.latest()
+                else:
+                    await storage.initialize()
+                    latest = await storage.deliveries.latest()
                 self.output(
                     f"Enabled: {'yes' if enabled else 'no'}\n"
                     f"Token configured: {'yes' if token_configured else 'no'}\n"
@@ -269,7 +272,7 @@ class CLI:
             require(settings.enabled, "Telegram disabled; set TELEGRAM_ENABLED=true.")
             if args.operation == "test":
                 service = compose_delivery(
-                    db,
+                    storage,
                     settings,
                     now=self.now,
                     sleep=self.sleep,
@@ -278,16 +281,15 @@ class CLI:
                 await service.test_connection()
                 self.output("Telegram accepted the harmless connection test.")
                 return
-            require(db.path.is_file(), "No local database; complete an analysis first.")
-            await db.initialize()
-            runs = SQLiteAnalysisRunRepository(db)
+            if storage.is_sqlite:
+                require(db.path.is_file(), "No local database; complete an analysis first.")
+            await storage.initialize()
+            runs = storage.analyses
             latest = await runs.latest_completed()
             require(latest is not None, "No completed analysis to deliver.")
-            prior = await SQLiteDeliveryRepository(db).get(
-                latest.run.run_id, settings.destination_key
-            )
+            prior = await storage.deliveries.get(latest.run.run_id, settings.destination_key)
             service = compose_delivery(
-                db,
+                storage,
                 settings,
                 now=self.now,
                 sleep=self.sleep,
@@ -315,11 +317,15 @@ class CLI:
             policy = SchedulerPolicy(settings)
             if args.operation == "status":
                 previous = None
-                if db.path.exists():
-                    async with readonly(db.path) as c:
-                        version = await check_schema(c)
-                    if version >= 2:
-                        previous = await SQLiteSchedulerRepository(db).latest()
+                if storage.is_sqlite:
+                    if db.path.exists():
+                        async with readonly(db.path) as c:
+                            version = await check_schema(c)
+                        if version >= 2:
+                            previous = await storage.scheduler.latest()
+                else:
+                    await storage.initialize()
+                    previous = await storage.scheduler.latest()
                 at = self.now()
                 self.output(
                     f"Enabled: {'yes' if settings.enabled else 'no'}\nCadence: 4h\n"
@@ -334,10 +340,10 @@ class CLI:
             if args.operation == "run":
                 require(settings.enabled, "Scheduler disabled; set SCHEDULER_ENABLED=true.")
             telegram_settings = TelegramSettings.from_environment()
-            await db.initialize(create_parent=True)
+            await storage.initialize(create_parent=True)
             delivery = (
                 compose_delivery(
-                    db,
+                    storage,
                     telegram_settings,
                     now=self.now,
                     sleep=self.sleep,
@@ -353,10 +359,10 @@ class CLI:
 
             scheduler = Scheduler(
                 settings,
-                SQLiteSchedulerRepository(db),
-                SQLiteAnalysisRunRepository(db),
+                storage.scheduler,
+                storage.analyses,
                 lambda record: compose_analysis(
-                    db,
+                    storage,
                     now=self.now,
                     provider_factory=self.provider_factory,
                     reasoner_factory=self.reasoner_factory,
@@ -378,6 +384,7 @@ class CLI:
                     )
             return
         if args.command == "doctor" or args.command == "backup" and args.operation == "inspect":
+            db = storage.sqlite_database("Database inspection")
             if args.command == "backup":
                 require(args.path is not None and args.output is None, "Use backup inspect PATH.")
             report = await inspect_database(
@@ -388,16 +395,20 @@ class CLI:
                 raise PersistenceError("Local integrity check failed; no repairs were attempted.")
             return
         if args.command == "backup":
+            db = storage.sqlite_database("Database backup")
             require(args.path is None, "Use backup --output PATH or backup inspect PATH.")
             path, _ = await backup_database(db.path, args.output, now=self.now())
             self.output(f"Verified backup: {path}")
             return
         if args.command in {"history", "status", "setups"}:
-            async with readonly(db.path) as connection:
-                await check_schema(connection)
+            if storage.is_sqlite:
+                async with readonly(db.path) as connection:
+                    await check_schema(connection)
+            else:
+                await storage.initialize()
         else:
-            await db.initialize(create_parent=True)
-        snapshots, runs = SQLiteSnapshotRepository(db), SQLiteAnalysisRunRepository(db)
+            await storage.initialize(create_parent=True)
+        snapshots, runs = storage.snapshots, storage.analyses
         service = ConfirmedStateService(snapshots)
         current = await service.load_current()
         if args.command == "setups":
@@ -429,15 +440,20 @@ class CLI:
                     )
             return
         if args.command == "status":
-            report = await inspect_database(db.path, now=self.now())
-            self.output(
-                f"Database bytes: {db.path.stat().st_size}; snapshots: {report.snapshots}; "
-                f"runs: {report.runs}"
-            )
+            if storage.is_sqlite:
+                report = await inspect_database(db.path, now=self.now())
+                self.output(
+                    f"Database bytes: {db.path.stat().st_size}; snapshots: {report.snapshots}; "
+                    f"runs: {report.runs}"
+                )
+                location = str(db.path)
+            else:
+                location = "configured PostgreSQL database"
+                self.output("Storage backend: postgres")
             last = await runs.latest_completed()
             result = AnalysisResultCodec.decode(last.result_json) if last else None
             self.output(
-                f"Database: {db.path}\nSnapshot: {current.snapshot.id if current else 'none'}\n"
+                f"Database: {location}\nSnapshot: {current.snapshot.id if current else 'none'}\n"
                 f"Revision: {current.revision if current else 0}"
             )
             count = (
@@ -456,7 +472,7 @@ class CLI:
             return
         if args.command == "analyze":
             result = await compose_analysis(
-                db,
+                storage,
                 now=self.now,
                 provider_factory=self.provider_factory,
                 reasoner_factory=self.reasoner_factory,

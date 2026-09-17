@@ -9,7 +9,7 @@ from advanced_trading_advisor.portfolio.models import ConfirmedPortfolioSnapshot
 
 
 class PersistenceError(RuntimeError):
-    """Local state could not be stored or restored."""
+    """Persistent state could not be stored or restored."""
 
 
 class ConflictError(PersistenceError):
