@@ -1,0 +1,58 @@
+# Python environments and generated packages
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test, lint, type-check and coverage output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases, backups and operational state
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.bak
+*.backup
+backups/
+local-data/
+.local/
+*.log
+
+# Editor and operating-system state
+.idea/
+.vscode/
+*.iml
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db

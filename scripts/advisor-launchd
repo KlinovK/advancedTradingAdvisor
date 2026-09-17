@@ -1,0 +1,261 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly LABEL="com.konstantinklinov.advanced-trading-advisor.scheduler"
+readonly SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+readonly ADVISOR_EXECUTABLE="${PROJECT_ROOT}/.venv/bin/advisor"
+readonly PYTHON_EXECUTABLE="${PROJECT_ROOT}/.venv/bin/python"
+readonly LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
+readonly PLIST_PATH="${LAUNCH_AGENTS_DIR}/${LABEL}.plist"
+readonly LOG_DIR="${PROJECT_ROOT}/.local/launchd"
+readonly STDOUT_LOG="${LOG_DIR}/scheduler.stdout.log"
+readonly STDERR_LOG="${LOG_DIR}/scheduler.stderr.log"
+readonly DOMAIN="gui/$(id -u)"
+readonly SERVICE_TARGET="${DOMAIN}/${LABEL}"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Commands:
+  install              Generate, install, and load the LaunchAgent
+  start | load         Load the installed job, or restart it if already loaded
+  stop                 Unload the job for the current login session
+  restart              Stop and start the installed job
+  status               Show launchd and application scheduler status
+  logs [lines]         Show the latest log lines (default: 100, maximum: 1000)
+  rotate-logs          Truncate the two local launchd log files
+  uninstall            Unload the job and remove its generated plist
+  render               Print the secret-free generated plist without installing it
+  help                 Show this help
+EOF
+}
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_user_launch_agent() {
+    [ "$(uname -s)" = "Darwin" ] || die "This helper supports macOS launchd only."
+    [ "$(id -u)" -ne 0 ] || die "Run this helper as the logged-in user, not as root."
+}
+
+is_privacy_protected_project_location() {
+    case "$PROJECT_ROOT" in
+        "$HOME/Desktop"|"$HOME/Desktop/"*|\
+        "$HOME/Documents"|"$HOME/Documents/"*|\
+        "$HOME/Downloads"|"$HOME/Downloads/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_launchd_accessible_project_location() {
+    if is_privacy_protected_project_location; then
+        die "macOS privacy protection prevents a background LaunchAgent from reliably accessing ${PROJECT_ROOT}. Move the checkout (including .env) outside Desktop, Documents, and Downloads; recreate .venv there; then install again."
+    fi
+}
+
+require_project_runtime() {
+    [ -x "$ADVISOR_EXECUTABLE" ] || die "Missing executable: ${ADVISOR_EXECUTABLE}. Create the project virtual environment first."
+    [ -x "$PYTHON_EXECUTABLE" ] || die "Missing executable: ${PYTHON_EXECUTABLE}. Create the project virtual environment first."
+}
+
+is_loaded() {
+    /bin/launchctl print "$SERVICE_TARGET" >/dev/null 2>&1
+}
+
+require_scheduler_enabled() {
+    if ! (
+        cd "$PROJECT_ROOT"
+        "$PYTHON_EXECUTABLE" -c \
+            'from advanced_trading_advisor.scheduler.settings import SchedulerSettings; raise SystemExit(0 if SchedulerSettings.from_environment().enabled else 1)'
+    ) >/dev/null 2>&1; then
+        die "Scheduler is disabled. Set SCHEDULER_ENABLED=true in ${PROJECT_ROOT}/.env before loading the job."
+    fi
+}
+
+render_plist() {
+    "$PYTHON_EXECUTABLE" - "$LABEL" "$PROJECT_ROOT" "$ADVISOR_EXECUTABLE" "$STDOUT_LOG" "$STDERR_LOG" <<'PY'
+import plistlib
+import sys
+
+label, project_root, advisor, stdout_log, stderr_log = sys.argv[1:]
+payload = {
+    "Label": label,
+    "ProgramArguments": [advisor, "scheduler", "run"],
+    "WorkingDirectory": project_root,
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ThrottleInterval": 30,
+    "ProcessType": "Background",
+    "ExitTimeOut": 30,
+    "Umask": 0o077,
+    "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+    "StandardOutPath": stdout_log,
+    "StandardErrorPath": stderr_log,
+}
+plistlib.dump(payload, sys.stdout.buffer, fmt=plistlib.FMT_XML, sort_keys=False)
+PY
+}
+
+prepare_local_paths() {
+    /bin/mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+    /usr/bin/touch "$STDOUT_LOG" "$STDERR_LOG"
+    /bin/chmod 600 "$STDOUT_LOG" "$STDERR_LOG"
+}
+
+generate_installed_plist() {
+    local temporary_plist
+
+    temporary_plist="$(/usr/bin/mktemp "${LAUNCH_AGENTS_DIR}/.${LABEL}.XXXXXX")"
+    if ! render_plist >"$temporary_plist"; then
+        /bin/rm -f "$temporary_plist"
+        die "Unable to render the LaunchAgent plist."
+    fi
+    /bin/chmod 600 "$temporary_plist"
+    if ! /usr/bin/plutil -lint "$temporary_plist" >/dev/null; then
+        /bin/rm -f "$temporary_plist"
+        die "Generated LaunchAgent plist is invalid."
+    fi
+    /bin/mv -f "$temporary_plist" "$PLIST_PATH"
+}
+
+install_job() {
+    require_user_launch_agent
+    require_launchd_accessible_project_location
+    require_project_runtime
+    require_scheduler_enabled
+    prepare_local_paths
+    generate_installed_plist
+
+    if is_loaded; then
+        /bin/launchctl bootout "$SERVICE_TARGET"
+    fi
+    /bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+    printf 'Installed and loaded %s\n' "$LABEL"
+}
+
+start_job() {
+    require_user_launch_agent
+    require_launchd_accessible_project_location
+    require_project_runtime
+    require_scheduler_enabled
+    prepare_local_paths
+    [ -f "$PLIST_PATH" ] || die "LaunchAgent is not installed. Run: $(basename "$0") install"
+
+    if is_loaded; then
+        /bin/launchctl kickstart -k "$SERVICE_TARGET"
+        printf 'Restarted %s\n' "$LABEL"
+    else
+        /bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+        printf 'Loaded %s\n' "$LABEL"
+    fi
+}
+
+stop_job() {
+    require_user_launch_agent
+    if is_loaded; then
+        /bin/launchctl bootout "$SERVICE_TARGET"
+        printf 'Stopped %s for the current login session.\n' "$LABEL"
+    else
+        printf '%s is not loaded.\n' "$LABEL"
+    fi
+}
+
+status_job() {
+    require_user_launch_agent
+    require_project_runtime
+
+    printf 'Label: %s\n' "$LABEL"
+    printf 'Plist: %s\n' "$PLIST_PATH"
+    printf 'Logs: %s\n' "$LOG_DIR"
+    if is_privacy_protected_project_location; then
+        printf 'WARNING: macOS privacy protection blocks reliable LaunchAgent execution from this project location.\n'
+    fi
+    if is_loaded; then
+        printf 'launchd status: loaded\n'
+        /bin/launchctl print "$SERVICE_TARGET"
+    else
+        printf 'launchd status: not loaded\n'
+    fi
+
+    printf '\nApplication scheduler status:\n'
+    (cd "$PROJECT_ROOT" && "$ADVISOR_EXECUTABLE" scheduler status)
+}
+
+show_logs() {
+    local lines="${1:-100}"
+
+    require_user_launch_agent
+    case "$lines" in
+        ''|*[!0-9]*) die "Log line count must be an integer from 1 to 1000." ;;
+    esac
+    [ "$lines" -ge 1 ] && [ "$lines" -le 1000 ] || die "Log line count must be from 1 to 1000."
+
+    printf '==> %s <==\n' "$STDOUT_LOG"
+    if [ -f "$STDOUT_LOG" ]; then
+        /usr/bin/tail -n "$lines" "$STDOUT_LOG"
+    else
+        printf '(not created yet)\n'
+    fi
+
+    printf '\n==> %s <==\n' "$STDERR_LOG"
+    if [ -f "$STDERR_LOG" ]; then
+        /usr/bin/tail -n "$lines" "$STDERR_LOG"
+    else
+        printf '(not created yet)\n'
+    fi
+}
+
+rotate_logs() {
+    require_user_launch_agent
+    prepare_local_paths
+    : >"$STDOUT_LOG"
+    : >"$STDERR_LOG"
+    /bin/chmod 600 "$STDOUT_LOG" "$STDERR_LOG"
+    printf 'Truncated launchd logs in %s\n' "$LOG_DIR"
+}
+
+uninstall_job() {
+    require_user_launch_agent
+    stop_job
+    if [ -f "$PLIST_PATH" ]; then
+        /bin/rm -f "$PLIST_PATH"
+        printf 'Removed %s\n' "$PLIST_PATH"
+    else
+        printf 'No installed plist found at %s\n' "$PLIST_PATH"
+    fi
+}
+
+command="${1:-help}"
+case "$command" in
+    install) install_job ;;
+    start|load) start_job ;;
+    stop) stop_job ;;
+    restart)
+        require_user_launch_agent
+        require_launchd_accessible_project_location
+        require_project_runtime
+        require_scheduler_enabled
+        [ -f "$PLIST_PATH" ] || die "LaunchAgent is not installed. Run: $(basename "$0") install"
+        stop_job
+        start_job
+        ;;
+    status) status_job ;;
+    logs) show_logs "${2:-100}" ;;
+    rotate-logs) rotate_logs ;;
+    uninstall) uninstall_job ;;
+    render)
+        # Rendering is side-effect free and portable; lifecycle commands remain Darwin-only.
+        require_project_runtime
+        render_plist
+        ;;
+    help|-h|--help) usage ;;
+    *)
+        usage >&2
+        die "Unknown command: ${command}"
+        ;;
+esac
