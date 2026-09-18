@@ -64,7 +64,10 @@ def create_storage(
             SQLiteSchedulerRepository(database),
             SQLiteDeliveryRepository(database),
         )
-    database = PostgresDatabase(settings.database_url, schema=postgres_schema)
+    database = PostgresDatabase(
+        settings.database_url,
+        schema="public" if postgres_schema is None else postgres_schema,
+    )
     return StorageBundle(
         settings,
         database,

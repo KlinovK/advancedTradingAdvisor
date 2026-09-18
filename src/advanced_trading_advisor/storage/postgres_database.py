@@ -22,7 +22,7 @@ class PostgresDatabase:
         *,
         connect_timeout_seconds: float = 10,
         command_timeout_seconds: float = 30,
-        schema: str | None = None,
+        schema: str = "public",
         driver=None,
     ):
         require(isinstance(database_url, str) and bool(database_url), "Database URL required.")
@@ -35,7 +35,7 @@ class PostgresDatabase:
             "Invalid PostgreSQL command timeout.",
         )
         require(
-            schema is None or re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema) is not None,
+            isinstance(schema, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema) is not None,
             "Invalid PostgreSQL schema name.",
         )
         self._database_url = database_url
@@ -72,16 +72,37 @@ class PostgresDatabase:
             "dsn": self._database_url,
             "timeout": self.connect_timeout_seconds,
             "command_timeout": self.command_timeout_seconds,
+            "server_settings": {"search_path": self.schema},
         }
-        if self.schema is not None:
-            options["server_settings"] = {"search_path": self.schema}
         try:
-            return await driver.connect(**options)
+            connection = await driver.connect(**options)
         except asyncio.CancelledError:
             raise
         except Exception:
             # Driver/client configuration errors can contain the full DSN.
             raise PersistenceError("PostgreSQL storage unavailable.") from None
+
+        try:
+            # Startup parameters are an optimization, not the isolation boundary. Activate the
+            # validated schema explicitly and fail closed if the server does not retain it.
+            await connection.fetchval("SELECT set_config('search_path', $1, false)", self.schema)
+            effective_schema = await connection.fetchval("SELECT current_schema()")
+            if effective_schema != self.schema:
+                raise PersistenceError("PostgreSQL schema isolation unavailable.")
+        except asyncio.CancelledError:
+            try:
+                await connection.close()
+            except Exception:
+                pass
+            raise
+        except Exception:
+            try:
+                await connection.close()
+            except Exception:
+                pass
+            # Schema/session errors can contain connection details or raw server configuration.
+            raise PersistenceError("PostgreSQL schema isolation unavailable.") from None
+        return connection
 
     @asynccontextmanager
     async def connection(self):

@@ -80,7 +80,11 @@ def test_storage_configuration_defaults_validation_and_secret_safe_repr(tmp_path
     assert postgres.database_url == secret_url
     assert secret_url not in repr(postgres)
     assert "sentinel-password" not in repr(postgres)
-    assert "sentinel-password" not in repr(create_storage(postgres).database)
+    postgres_database = create_storage(postgres).database
+    assert postgres_database.schema == "public"
+    assert "sentinel-password" not in repr(postgres_database)
+    with pytest.raises(ValueError, match="Invalid PostgreSQL schema name"):
+        create_storage(postgres, postgres_schema="")
 
     with pytest.raises(ValueError, match="requires ADVISOR_DATABASE_URL"):
         StorageSettings.from_environment(
@@ -158,6 +162,56 @@ def test_postgres_connection_failure_is_sanitized():
     assert "secret-password" not in repr(database)
 
 
+@pytest.mark.parametrize("activation_failure", [False, True])
+def test_postgres_schema_isolation_failure_closes_and_is_sanitized(activation_failure):
+    sentinel = "postgresql://sentinel-user:sentinel-password@sentinel-host/advisor"
+
+    class DriverFailure(Exception):
+        pass
+
+    class FakeConnection:
+        closed = False
+
+        async def fetchval(self, query, *_args):
+            if activation_failure:
+                raise DriverFailure(f"schema activation failed for {sentinel}")
+            if "current_schema" in query:
+                return "public"
+            return "advisor_test_expected"
+
+        async def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+
+    class FakeDriver:
+        PostgresError = DriverFailure
+
+        @staticmethod
+        async def connect(**options):
+            assert options["server_settings"] == {"search_path": "advisor_test_expected"}
+            return connection
+
+    async def fail():
+        database = PostgresDatabase(
+            sentinel,
+            schema="advisor_test_expected",
+            driver=FakeDriver,
+        )
+        async with database.connection():
+            raise AssertionError("A schema-mismatched connection must never be yielded.")
+
+    with pytest.raises(PersistenceError) as captured:
+        asyncio.run(fail())
+    assert str(captured.value) == "PostgreSQL schema isolation unavailable."
+    assert connection.closed
+    rendered = str(captured.value)
+    assert sentinel not in rendered
+    assert "sentinel-password" not in rendered
+    assert "sentinel-host" not in rendered
+    assert "schema activation failed" not in rendered
+
+
 def test_postgres_operation_failure_is_sanitized():
     sentinel = "postgresql://user:secret-password@secret-host/advisor"
 
@@ -165,6 +219,11 @@ def test_postgres_operation_failure_is_sanitized():
         pass
 
     class FakeConnection:
+        async def fetchval(self, query, *_args):
+            if "current_schema" in query:
+                return "public"
+            return "public"
+
         async def execute(self, *_args):
             raise DriverFailure(f"query failed against {sentinel}")
 
@@ -226,12 +285,68 @@ async def isolated_postgres_schema():
         )
         yield scoped, schema
     finally:
-        if scoped is not None:
-            await scoped.close()
         try:
-            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            if scoped is not None:
+                await scoped.close()
         finally:
-            await admin.close()
+            try:
+                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            finally:
+                await admin.close()
+
+
+async def postgres_connection_namespace(database):
+    async with database.connection() as connection:
+        effective_schema = await connection.fetchval("SELECT current_schema()")
+        relation_schema = await connection.fetchval(
+            """SELECT namespace.nspname
+               FROM pg_class relation
+               JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+               WHERE relation.oid=to_regclass('current_portfolio')"""
+        )
+        current_count = await connection.fetchval("SELECT count(*) FROM current_portfolio")
+        return effective_schema, relation_schema, current_count
+
+
+def test_isolated_postgres_schema_attempts_drop_when_scoped_close_fails(monkeypatch):
+    statements = []
+
+    class AdminConnection:
+        closed = False
+
+        async def execute(self, statement):
+            statements.append(statement)
+
+        async def close(self):
+            self.closed = True
+
+    class ScopedConnection:
+        async def close(self):
+            raise RuntimeError("scoped close failed")
+
+    admin = AdminConnection()
+    scoped = ScopedConnection()
+
+    class FakeDriver:
+        calls = 0
+
+        @classmethod
+        async def connect(cls, **_options):
+            cls.calls += 1
+            return admin if cls.calls == 1 else scoped
+
+    monkeypatch.setattr(importlib, "import_module", lambda _name: FakeDriver)
+
+    async def scenario():
+        async with isolated_postgres_schema():
+            pass
+
+    with pytest.raises(RuntimeError, match="scoped close failed"):
+        asyncio.run(scenario())
+    assert statements[0].startswith('CREATE SCHEMA "advisor_test_')
+    assert statements[1].startswith('DROP SCHEMA IF EXISTS "advisor_test_')
+    assert statements[1].endswith('" CASCADE')
+    assert admin.closed
 
 
 @pytest.mark.postgres_integration
@@ -335,6 +450,20 @@ def test_postgres_repository_contracts_in_isolated_schema():
             )
             database = storage.database
             await storage.initialize()
+
+            assert await postgres_connection_namespace(database) == (schema, schema, 0)
+            sequential_namespaces = [
+                await postgres_connection_namespace(database) for _ in range(3)
+            ]
+            assert sequential_namespaces == [(schema, schema, 0)] * 3
+            concurrent_namespaces = await asyncio.gather(
+                *(postgres_connection_namespace(database) for _ in range(4))
+            )
+            assert concurrent_namespaces == [(schema, schema, 0)] * 4
+            assert (
+                await asyncio.gather(*(storage.snapshots.get_current() for _ in range(4)))
+                == [None] * 4
+            )
 
             service = ConfirmedStateService(storage.snapshots)
             first = pg_snapshot()
@@ -519,5 +648,64 @@ def test_postgres_repository_contracts_in_isolated_schema():
                     await immutable.execute(
                         "DELETE FROM confirmed_updates WHERE new_snapshot_id=$1", first.id
                     )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.skipif(
+    not TEST_POSTGRES_URL,
+    reason="ADVISOR_TEST_POSTGRES_URL is not configured",
+)
+def test_postgres_target_schema_cannot_observe_control_schema_state():
+    async def scenario():
+        async with isolated_postgres_schema() as (_, control_schema):
+            control = create_storage(
+                StorageSettings(StorageBackend.POSTGRES, Path("ignored.sqlite"), TEST_POSTGRES_URL),
+                postgres_schema=control_schema,
+            )
+            await control.initialize()
+            await ConfirmedStateService(control.snapshots).initialize(pg_snapshot())
+            control_namespace = await postgres_connection_namespace(control.database)
+            assert control_namespace == (control_schema, control_schema, 1)
+
+            async with isolated_postgres_schema() as (_, target_schema):
+                target = create_storage(
+                    StorageSettings(
+                        StorageBackend.POSTGRES,
+                        Path("ignored.sqlite"),
+                        TEST_POSTGRES_URL,
+                    ),
+                    postgres_schema=target_schema,
+                )
+                await target.initialize()
+                assert await postgres_connection_namespace(target.database) == (
+                    target_schema,
+                    target_schema,
+                    0,
+                )
+                assert await target.snapshots.get_current() is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.skipif(
+    not TEST_POSTGRES_URL,
+    reason="ADVISOR_TEST_POSTGRES_URL is not configured",
+)
+def test_postgres_missing_schema_fails_closed_without_public_fallback():
+    async def scenario():
+        async with isolated_postgres_schema() as (connection, schema):
+            storage = create_storage(
+                StorageSettings(StorageBackend.POSTGRES, Path("ignored.sqlite"), TEST_POSTGRES_URL),
+                postgres_schema=schema,
+            )
+            await connection.execute(f'DROP SCHEMA "{schema}" CASCADE')
+            with pytest.raises(
+                PersistenceError,
+                match=r"^PostgreSQL schema isolation unavailable\.$",
+            ):
+                await storage.initialize()
 
     asyncio.run(scenario())
