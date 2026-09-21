@@ -48,6 +48,8 @@ from advanced_trading_advisor.telegram.settings import TelegramSettings
 from advanced_trading_advisor.telegram.transport import TelegramSendError
 
 from .composition import compose_analysis, compose_delivery
+from .migration import add_parser as add_migration_parser
+from .migration import run as run_migration
 from .report import render_analysis, render_manual_spot_trade, render_setups, render_snapshot
 
 
@@ -71,6 +73,7 @@ def parser():
         default=os.environ.get("ADVISOR_DB_PATH", "~/.advanced_trading_advisor/advisor.sqlite"),
     )
     commands = root.add_subparsers(dest="command")
+    add_migration_parser(commands)
     setup = commands.add_parser("setup")
     portfolio = commands.add_parser("portfolio").add_subparsers(dest="operation", required=True)
     portfolio.add_parser("show")
@@ -238,6 +241,8 @@ class CLI:
         self.telegram_sender_factory = telegram_sender_factory
 
     async def run(self, args):
+        if args.command == "migration":
+            return await run_migration(args, self.output)
         storage = create_storage(StorageSettings.from_environment(sqlite_path=Path(args.db)))
         return await self._run(args, storage)
 

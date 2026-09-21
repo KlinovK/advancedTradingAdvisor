@@ -169,6 +169,73 @@ and a central numeric context are added. Static unknown symbols now fail explici
 The calculator requires normalized, ordered, valid, closed 4H candles. It verifies spacing;
 the live adapter establishes closure against an injected UTC clock before calculation.
 
+## SQLite → PostgreSQL migration tooling
+
+Migration is an explicit operator workflow. It does **not** stop launchd, switch storage,
+send messages, run analyses, or enable cloud scheduling. Keep local SQLite authoritative
+during development and rehearsal. Never run local and cloud schedulers as simultaneous
+authorities.
+
+Capture a consistent source using the existing SQLite online backup API (never `cp` the
+live database, WAL, or SHM files):
+
+```bash
+advisor --db SOURCE backup --output BACKUP
+advisor migration inspect --source BACKUP
+```
+
+Use an explicit new backup path. Backup capture refuses overwrite, uses private file
+permissions, and verifies integrity. Migration commands read backups in a consistent,
+read-only transaction; known default/configured live SQLite paths are rejected. A custom
+path is not proof of backup provenance: operators must use the capture command above.
+
+For PostgreSQL operations, supply `ADVISOR_DATABASE_URL` through the **process environment**
+using a private credential mechanism. Migration does not load this URL from `.env` or accept
+it as a command argument. Do not put URLs in shell history, scripts, reports, or commits.
+
+```bash
+advisor migration rehearse --source BACKUP
+```
+
+Rehearsal creates its own `advisor_rehearsal_<uuid4hex>` schema, imports and verifies all
+durable state, then drops that exact schema. It never initializes or imports into `public`.
+It can report in-progress source state without recovering it. If cleanup fails, the error
+reports only the generated schema name for explicit manual inspection/cleanup. An
+unacknowledged CREATE may also require inspection; schemas are never enumerated/deleted by
+prefix. Keep backups private and outside source control.
+
+Final cutover is a separate, explicitly authorized operation: freeze manual writers, choose
+a window between slots, verify no active analysis/scheduler/delivery work, unload local
+launchd, confirm it stopped, and capture a **new final backup**. Then:
+
+```bash
+advisor migration import --source FINAL_BACKUP --target-schema public
+advisor migration verify --source FINAL_BACKUP --target-schema public
+```
+
+Import refuses RUNNING analyses, RUNNING scheduler executions, and SENDING deliveries.
+It locks the target, initializes a completely empty schema to v3 when necessary, and
+imports in one transaction with constraints/triggers enabled. Existing initialized targets
+must be compatible v3. Payload text and history are copied verbatim; IDs/timestamps retain
+their exact values. Every row is validated before commit. A mismatch rolls back both new
+schema initialization and data import. Partially populated/different targets are refused;
+there is no merge, repair, overwrite, reset, or historical replay.
+
+An identical rerun reports `verified_noop` without data writes. If COMMIT acknowledgement
+is lost, rerun against the same backup: complete equality establishes success; different
+state requires investigation. `verify` uses a PostgreSQL read-only repeatable-read
+transaction, never initializes a schema, and refuses missing/incompatible/different state.
+Reports contain counts, IDs, lifecycle summaries, and digests, never payloads or Telegram
+destination hashes. The source must be schema v3; historical payload versions are retained.
+
+Only after successful verification should an operator authorize a controlled cloud run,
+then recurring scheduling. After the first PostgreSQL/cloud write, SQLite is stale:
+re-enabling it is **not** a safe rollback. Stop cloud writers and reconcile/reverse-migrate
+new analysis, portfolio, scheduler, and delivery history before changing authority.
+
+Offline tests need no PostgreSQL. Disposable PostgreSQL 17 CI runs both storage and migration
+integration modules; locally these remain skipped without `ADVISOR_TEST_POSTGRES_URL`.
+
 ## Persistence backends
 
 SQLite remains the default local backend and is accessed through `aiosqlite` (tested with 0.22.1).
