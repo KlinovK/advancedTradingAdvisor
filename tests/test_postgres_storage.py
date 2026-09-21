@@ -275,24 +275,20 @@ async def isolated_postgres_schema():
             pytrace=False,
         )
     schema = f"advisor_test_{uuid4().hex}"
-    scoped = None
     try:
         await admin.execute(f'CREATE SCHEMA "{schema}"')
-        scoped = await driver.connect(
-            dsn=TEST_POSTGRES_URL,
-            timeout=10,
-            server_settings={"search_path": schema},
-        )
-        yield scoped, schema
+        database = PostgresDatabase(TEST_POSTGRES_URL, schema=schema, driver=driver)
+        async with database.connection() as scoped:
+            if await scoped.fetchval("SELECT current_schema()") != schema:
+                pytest.fail("Isolated PostgreSQL schema activation failed.", pytrace=False)
+            if await scoped.fetchval("SELECT to_regclass('schema_metadata')") is not None:
+                pytest.fail("Isolated PostgreSQL schema is not fresh.", pytrace=False)
+            yield scoped, schema
     finally:
         try:
-            if scoped is not None:
-                await scoped.close()
+            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         finally:
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
+            await admin.close()
 
 
 async def postgres_connection_namespace(database):
@@ -308,44 +304,94 @@ async def postgres_connection_namespace(database):
         return effective_schema, relation_schema, current_count
 
 
-def test_isolated_postgres_schema_attempts_drop_when_scoped_close_fails(monkeypatch):
+@pytest.mark.parametrize("failure", [None, "close", "schema", "freshness"])
+def test_isolated_postgres_schema_checks_and_cleanup(monkeypatch, failure):
     statements = []
+    events = []
+    monkeypatch.setitem(
+        globals(),
+        "TEST_POSTGRES_URL",
+        "postgresql://test-user:test-password@test.invalid/advisor-test",
+    )
 
     class AdminConnection:
         closed = False
 
         async def execute(self, statement):
             statements.append(statement)
+            events.append("drop" if statement.startswith("DROP") else "create")
 
         async def close(self):
             self.closed = True
+            events.append("admin_close")
 
     class ScopedConnection:
+        schema = None
+        schema_checks = 0
+
+        async def fetchval(self, query, *args):
+            if "set_config" in query:
+                self.schema = args[0]
+                return self.schema
+            if "current_schema" in query:
+                self.schema_checks += 1
+                # Let the production connection boundary pass, then test the fixture guard.
+                if failure == "schema" and self.schema_checks == 2:
+                    return "public"
+                return self.schema
+            if "to_regclass" in query:
+                return "schema_metadata" if failure == "freshness" else None
+            raise AssertionError("Unexpected fixture query.")
+
         async def close(self):
-            raise RuntimeError("scoped close failed")
+            events.append("scoped_close")
+            if failure == "close":
+                raise RuntimeError("scoped close failed")
 
     admin = AdminConnection()
     scoped = ScopedConnection()
 
     class FakeDriver:
         calls = 0
+        PostgresError = ()
+        InterfaceError = ()
 
         @classmethod
-        async def connect(cls, **_options):
+        async def connect(cls, **options):
             cls.calls += 1
+            if cls.calls == 2:
+                assert options["server_settings"]["search_path"].startswith("advisor_test_")
             return admin if cls.calls == 1 else scoped
 
     monkeypatch.setattr(importlib, "import_module", lambda _name: FakeDriver)
 
     async def scenario():
-        async with isolated_postgres_schema():
-            pass
+        async with isolated_postgres_schema() as (connection, schema):
+            assert failure not in {"schema", "freshness"}, "Invalid fixture was yielded."
+            assert connection is scoped
+            assert scoped.schema == schema
+            assert scoped.schema_checks == 2
+            events.append("yield")
 
-    with pytest.raises(RuntimeError, match="scoped close failed"):
+    if failure == "close":
+        with pytest.raises(PersistenceError, match="PostgreSQL storage close failed"):
+            asyncio.run(scenario())
+    elif failure in {"schema", "freshness"}:
+        message = "activation failed" if failure == "schema" else "not fresh"
+        with pytest.raises(pytest.fail.Exception, match=message):
+            asyncio.run(scenario())
+    else:
         asyncio.run(scenario())
     assert statements[0].startswith('CREATE SCHEMA "advisor_test_')
     assert statements[1].startswith('DROP SCHEMA IF EXISTS "advisor_test_')
     assert statements[1].endswith('" CASCADE')
+    assert statements[1] == statements[0].replace("CREATE SCHEMA", "DROP SCHEMA IF EXISTS") + (
+        " CASCADE"
+    )
+    expected_events = ["create"]
+    if failure not in {"schema", "freshness"}:
+        expected_events.append("yield")
+    assert events == [*expected_events, "scoped_close", "drop", "admin_close"]
     assert admin.closed
 
 
@@ -357,6 +403,8 @@ def test_isolated_postgres_schema_attempts_drop_when_scoped_close_fails(monkeypa
 def test_postgres_v1_migrates_to_v3_and_preserves_canonical_state():
     async def scenario():
         async with isolated_postgres_schema() as (connection, schema):
+            assert await connection.fetchval("SELECT current_schema()") == schema
+            assert await connection.fetchval("SELECT to_regclass('schema_metadata')") is None
             async with connection.transaction():
                 for statement in POSTGRES_MIGRATIONS[1]:
                     await connection.execute(statement)
