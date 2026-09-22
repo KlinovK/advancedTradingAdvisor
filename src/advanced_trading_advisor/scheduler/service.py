@@ -36,10 +36,29 @@ class Scheduler:
         self.now, self.sleep, self.output = now, sleep, output
         self.on_completed = on_completed
 
-    async def once(self, scheduled_for=None):
+    async def dispatch(self):
+        """Process at most one recent slot; a duplicate never replays work or delivery."""
+        slot = self.policy.catchup(self.now())
+        if slot is None:
+            return "no_eligible_slot"
+        owner = uuid4()
+        result = await self.once(scheduled_for=slot, owner_token=owner)
+        if result is None:
+            raise PersistenceError("Dispatched scheduler record unavailable.")
+        if result.owner_token != owner:
+            return (
+                "already_claimed"
+                if result.status is ScheduledStatus.RUNNING
+                else "already_terminal"
+            )
+        return result.status.value.lower()
+
+    async def once(self, scheduled_for=None, *, owner_token=None):
         at = self.now()
         slot = scheduled_for or self.policy.window(at).previous_run
-        record = ScheduledExecution(slot, self.policy.expected_cutoff(slot), uuid4(), at)
+        record = ScheduledExecution(
+            slot, self.policy.expected_cutoff(slot), owner_token or uuid4(), at
+        )
         try:
             claimed = await self.repository.claim(record)
         except asyncio.CancelledError:

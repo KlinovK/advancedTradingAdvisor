@@ -80,3 +80,4 @@ jobs:
           -m postgres_integration
           tests/test_postgres_storage.py
           tests/test_postgres_migration.py
+          tests/test_postgres_dispatch.py

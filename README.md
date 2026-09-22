@@ -927,6 +927,72 @@ report cancellation, backup during an uncommitted writer, corruption, doctor exi
 legacy report compatibility. Manual reliability smoke uses only a temporary DB and static data;
 no live OpenAI call is required. Restore and automatic execution remain deferred.
 
+## Finite cloud dispatch (prepared, not activated)
+
+`advisor scheduler dispatch` is the one-invocation cloud entry point. It uses the existing
+`SchedulerPolicy.catchup(now)` and calls `Scheduler.once(scheduled_for=slot)` at most once.
+There is no loop, historical queue, or new retry policy. At the default 4-hour cadence and
+10-minute candle delay, an 08:10 UTC slot is eligible from 08:10 through **08:40 inclusive**.
+08:09 and 08:40:00.000001 are no-ops. An 08:17 runner still uses the **08:00 market cutoff**.
+Late runners outside the window skip the missed slot, rather than backfilling it.
+
+The command reads **process environment only**, not `.env`, and requires PostgreSQL,
+`SCHEDULER_ENABLED=true`, valid live CoinGecko settings, and valid AI/Telegram settings when
+enabled. Configuration preflight performs no I/O. Outside the eligible window it does not
+connect to storage. Eligible dispatch checks the existing PostgreSQL v3 schema read-only
+and requires a confirmed portfolio; it never initializes/migrates storage. Eligibility is
+rechecked after readiness checks. Existing local `run`/`once` and dotenv behavior are unchanged.
+
+Safe outcomes: `completed`, `no_eligible_slot`, `already_claimed`, `already_terminal`, `skipped`,
+or `failed`. No-op/duplicate/analysis-busy outcomes exit 0. A newly failed analysis, incomplete
+delivery, or unexpected operational failure exits nonzero with sanitized information.
+AI fallback remains a successful analysis. Telegram delivery runs only after durable successful
+analysis/slot completion; delivery failure never undoes that completion. Repeating dispatch
+does not retry a completed/failed slot or resend its notification. A crash between completion
+and delivery requires separate operator review; dispatch does not replay delivery automatically.
+
+PostgreSQL slot uniqueness, owner fencing, analysis leases, and delivery uniqueness are the
+authority. Existing stale RUNNING recovery reconciles durable completion or marks interruption;
+it does not reclaim/re-execute that slot. GitHub concurrency is only an outer guard, with
+`cancel-in-progress: false` to avoid interrupting analysis/delivery.
+
+`.github/workflows/advisor-scheduler.yml` has **only `workflow_dispatch`**, no automatic trigger.
+The eventual UTC cron is `10 */4 * * *`, but a separate authorized activation commit must add
+it after cutover. GitHub runner delays can exceed the catch-up window; no exact-time delivery
+guarantee is implied. The job uses Ubuntu, Python 3.13, `pip install .`, read-only repository
+permissions, and a 10-minute outer timeout. Timeout/crash recovery still uses existing leases.
+
+Required GitHub Secrets (names only): `ADVISOR_DATABASE_URL`, `COINGECKO_API_KEY`,
+`OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. They are scoped to the dispatch
+step, never installation or artifacts. Do not write a runner `.env` or echo configuration.
+
+Ordinary workflow environment is explicit:
+
+| Setting | Workflow value |
+| --- | --- |
+| `ADVISOR_STORAGE_BACKEND` | `postgres` |
+| `COINGECKO_API_TIER` / `MARKET_DATA_TIMEOUT_SECONDS` | `demo` / `10` (live adapter; no separate live-mode variable) |
+| `OPENAI_ENABLED` / `OPENAI_MODEL` | `true` / `gpt-5.6-terra` (current application default) |
+| `OPENAI_REASONING_EFFORT` / `OPENAI_TIMEOUT_SECONDS` | `low` / `45` |
+| `TELEGRAM_ENABLED` / `TELEGRAM_TIMEOUT_SECONDS` | `true` / `10` |
+| `TELEGRAM_DISABLE_NOTIFICATION` | `false` |
+| `SCHEDULER_ENABLED` / `SCHEDULER_INTERVAL_HOURS` | `true` / `4` |
+| `SCHEDULER_CANDLE_DELAY_MINUTES` | `10` |
+| `SCHEDULER_MAX_STARTUP_CATCHUP_AGE_MINUTES` | `30` |
+| `PYTHONUNBUFFERED` | `1` |
+
+Manual acceptance is **not authorized by installing this workflow**. After offline and
+disposable PostgreSQL CI pass, separately authorize cutover: stop local authority, freeze
+writers, capture/import/verify the final backup using the migration runbook, then configure
+GitHub Secrets privately. Review the workflow's model/configuration before use. Local launchd
+must never overlap an activated cloud scheduler, even while SQLite and PostgreSQL are separate.
+Only then authorize one `workflow_dispatch` inside the catch-up window. Verify one terminal
+slot, one persisted analysis with the slot-derived cutoff, and one durable delivery result.
+An authorized duplicate invocation must produce no additional analysis or notification.
+Outside-window acceptance should be a clean no-op. Keep automatic scheduling absent until
+this controlled acceptance succeeds and activation is explicitly approved. After cloud writes,
+do not re-enable stale SQLite as a rollback.
+
 ## Foreground 4H scheduler (Phase 7)
 
 The scheduler runs the existing `AnalyzeCurrentPortfolio` service against the latest explicitly

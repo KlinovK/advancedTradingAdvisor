@@ -26,9 +26,10 @@ def compose_analysis(
     source="live",
     scheduled=None,
     sleep=asyncio.sleep,
+    environment=None,
 ):
     storage = as_storage(storage)
-    settings = OpenAISettings.from_environment(enabled=ai_override)
+    settings = OpenAISettings.from_environment(environment, enabled=ai_override)
     reasoner = reasoner_factory(settings) if settings.enabled else None
 
     def provider():
@@ -46,7 +47,7 @@ def compose_analysis(
                 as_of=now(),
             )
         else:
-            result = CoinGeckoMarketDataProvider(CoinGeckoSettings.from_environment())
+            result = CoinGeckoMarketDataProvider(CoinGeckoSettings.from_environment(environment))
         return (
             ScheduledMarketProvider(result, scheduled.expected_cutoff, sleep=sleep)
             if scheduled

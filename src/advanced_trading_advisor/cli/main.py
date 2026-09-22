@@ -48,6 +48,7 @@ from advanced_trading_advisor.telegram.settings import TelegramSettings
 from advanced_trading_advisor.telegram.transport import TelegramSendError
 
 from .composition import compose_analysis, compose_delivery
+from .dispatch import run as run_dispatch
 from .migration import add_parser as add_migration_parser
 from .migration import run as run_migration
 from .report import render_analysis, render_manual_spot_trade, render_setups, render_snapshot
@@ -118,7 +119,7 @@ def parser():
     commands.add_parser("status")
     commands.add_parser("doctor")
     scheduler = commands.add_parser("scheduler")
-    scheduler.add_argument("operation", choices=["run", "once", "status"])
+    scheduler.add_argument("operation", choices=["run", "once", "status", "dispatch"])
     telegram = commands.add_parser("telegram")
     telegram.add_argument("operation", choices=["status", "test", "send-latest"])
     backup = commands.add_parser("backup")
@@ -241,6 +242,8 @@ class CLI:
         self.telegram_sender_factory = telegram_sender_factory
 
     async def run(self, args):
+        if args.command == "scheduler" and args.operation == "dispatch":
+            return await run_dispatch(self)
         if args.command == "migration":
             return await run_migration(args, self.output)
         storage = create_storage(StorageSettings.from_environment(sqlite_path=Path(args.db)))
