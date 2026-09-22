@@ -361,10 +361,11 @@ def test_cloud_cli_exits_safely_and_readiness_is_readonly(cloud_env, monkeypatch
     storage.database._validate_schema.assert_awaited_once()
 
 
-def test_workflow_is_manual_only_and_secret_scoped():
+def test_workflow_supports_production_schedule_manual_dispatch_and_secret_scoping():
     text = (Path(__file__).parents[1] / ".github/workflows/advisor-scheduler.yml").read_text()
     assert "  workflow_dispatch:" in text
-    assert "schedule:" not in text
+    assert '\non:\n  workflow_dispatch:\n  schedule:\n    - cron: "10 */4 * * *"\n' in text
+    assert text.count("    - cron:") == 1
     assert "contents: read" in text and "cancel-in-progress: false" in text
     assert 'python-version: "3.13"' in text
     assert "run: .venv/bin/advisor scheduler dispatch" in text

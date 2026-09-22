@@ -1,9 +1,10 @@
-name: Advisor scheduler (manual acceptance only)
+name: Advisor scheduler
 
-# Automatic activation requires a separate authorized cutover commit.
-# Eventual UTC cron: 10 */4 * * *
+# UTC slots: 00:10, 04:10, 08:10, 12:10, 16:10, 20:10.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "10 */4 * * *"
 
 permissions:
   contents: read
