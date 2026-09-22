@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import traceback
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -17,7 +18,7 @@ from test_scheduler import Clock, Provider, prepared, scheduler
 from advanced_trading_advisor.cli import dispatch
 from advanced_trading_advisor.cli.main import main
 from advanced_trading_advisor.delivery.models import DeliveryStatus
-from advanced_trading_advisor.domain.persistence import FailureCategory
+from advanced_trading_advisor.domain.persistence import FailureCategory, PersistenceError
 from advanced_trading_advisor.market.errors import MalformedMarketDataError
 from advanced_trading_advisor.scheduler.models import ScheduledExecution, ScheduledStatus
 from advanced_trading_advisor.scheduler.service import Scheduler
@@ -157,23 +158,23 @@ def test_cloud_noop_ignores_dotenv_and_never_connects(cloud_env, monkeypatch, tm
 
 
 @pytest.mark.parametrize(
-    "key,value",
+    "key,value,section",
     [
-        ("ADVISOR_STORAGE_BACKEND", "sqlite"),
-        ("ADVISOR_DATABASE_URL", ""),
-        ("COINGECKO_API_KEY", ""),
-        ("COINGECKO_API_TIER", "pro"),
-        ("MARKET_DATA_TIMEOUT_SECONDS", "invalid"),
-        ("OPENAI_ENABLED", "invalid"),
-        ("OPENAI_ENABLED", "true"),
-        ("TELEGRAM_ENABLED", "true"),
-        ("SCHEDULER_ENABLED", "false"),
-        ("SCHEDULER_INTERVAL_HOURS", "1"),
-        ("SCHEDULER_CANDLE_DELAY_MINUTES", "0"),
-        ("SCHEDULER_MAX_STARTUP_CATCHUP_AGE_MINUTES", "61"),
+        ("ADVISOR_STORAGE_BACKEND", "sqlite", "storage"),
+        ("ADVISOR_DATABASE_URL", "", "storage"),
+        ("COINGECKO_API_KEY", "", "market"),
+        ("COINGECKO_API_TIER", "pro", "market"),
+        ("MARKET_DATA_TIMEOUT_SECONDS", "invalid", "market"),
+        ("OPENAI_ENABLED", "invalid", "openai"),
+        ("OPENAI_ENABLED", "true", "openai"),
+        ("TELEGRAM_ENABLED", "true", "telegram"),
+        ("SCHEDULER_ENABLED", "false", "scheduler"),
+        ("SCHEDULER_INTERVAL_HOURS", "1", "scheduler"),
+        ("SCHEDULER_CANDLE_DELAY_MINUTES", "0", "scheduler"),
+        ("SCHEDULER_MAX_STARTUP_CATCHUP_AGE_MINUTES", "61", "scheduler"),
     ],
 )
-def test_cloud_preflight_fails_before_storage(cloud_env, monkeypatch, key, value):
+def test_cloud_preflight_fails_before_storage(cloud_env, monkeypatch, key, value, section):
     monkeypatch.setenv(key, value)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -184,7 +185,104 @@ def test_cloud_preflight_fails_before_storage(cloud_env, monkeypatch, key, value
     monkeypatch.setattr(dispatch, "create_storage", forbidden)
     output = []
     assert main(["scheduler", "dispatch"], now=lambda: NOW, output=output.append) == 1
-    assert output == ["Error: Cloud dispatch configuration invalid; check required settings."]
+    assert output == [f"Error: Cloud dispatch configuration invalid: {section}."]
+
+
+@pytest.fixture
+def no_preflight_side_effects(monkeypatch):
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("unexpected downstream call")
+        raise AssertionError("Preflight must fail before downstream construction")
+
+    for name in ("create_storage", "compose_analysis", "compose_delivery", "Scheduler"):
+        monkeypatch.setattr(dispatch, name, forbidden)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "key,value,section",
+    [
+        ("ADVISOR_DATABASE_URL", " \n\t", "storage"),
+        ("ADVISOR_DATABASE_URL", "https://sentinel.invalid/private", "storage"),
+        ("ADVISOR_DATABASE_URL", "postgresql://user:secret@[broken/private", "storage"),
+        ("COINGECKO_API_KEY", " sentinel-private", "market"),
+        ("COINGECKO_API_KEY", "sentinel-private\n", "market"),
+        ("OPENAI_API_KEY", "sentinel-private\n", "openai"),
+        ("OPENAI_API_KEY", "sentinel private", "openai"),
+        ("TELEGRAM_BOT_TOKEN", "123:" + "offline" * 4 + "\n", "telegram"),
+        ("TELEGRAM_BOT_TOKEN", "sentinel-private", "telegram"),
+        ("TELEGRAM_CHAT_ID", " 12345", "telegram"),
+        ("TELEGRAM_CHAT_ID", "https://sentinel.invalid/private", "telegram"),
+    ],
+)
+def test_secret_backed_validation_reports_only_section(
+    cloud_env, monkeypatch, no_preflight_side_effects, key, value, section
+):
+    monkeypatch.setenv("OPENAI_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "offline-test-only")
+    monkeypatch.setenv("TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:" + "offline" * 4)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    monkeypatch.setenv(key, value)
+    output = []
+    assert main(["scheduler", "dispatch"], now=lambda: NOW, output=output.append) == 1
+    assert output == [f"Error: Cloud dispatch configuration invalid: {section}."]
+    assert no_preflight_side_effects == []
+
+
+@pytest.mark.parametrize(
+    "section,settings",
+    [
+        ("storage", dispatch.StorageSettings),
+        ("market", dispatch.CoinGeckoSettings),
+        ("openai", dispatch.OpenAISettings),
+        ("telegram", dispatch.TelegramSettings),
+        ("scheduler", dispatch.SchedulerSettings),
+    ],
+)
+@pytest.mark.parametrize("error_type", [ValueError, RuntimeError, TypeError, OSError])
+def test_preflight_exception_diagnostics_are_allowlisted_and_sanitized(
+    cloud_env, monkeypatch, no_preflight_side_effects, section, settings, error_type
+):
+    private = "synthetic-secret https://private.invalid/path raw exception payload"
+
+    def broken(*_args, **_kwargs):
+        raise error_type(private)
+
+    monkeypatch.setattr(settings, "from_environment", broken)
+    message = (
+        f"Cloud dispatch configuration invalid: {section}."
+        if error_type is ValueError
+        else "Cloud dispatch preflight failed unexpectedly."
+    )
+    output = []
+    assert main(["scheduler", "dispatch"], now=lambda: NOW, output=output.append) == 1
+    assert output == [f"Error: {message}"]
+    # Also protect callers rendering a traceback, not just the CLI's concise error.
+    with pytest.raises(PersistenceError) as captured:
+        asyncio.run(dispatch.run(SimpleNamespace()))
+    assert str(captured.value) == message
+    assert captured.value.__suppress_context__
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert private not in rendered
+    assert "synthetic-secret" not in repr(captured.value)
+    assert no_preflight_side_effects == []
+
+
+def test_unknown_diagnostic_section_cannot_be_rendered():
+    with pytest.raises(RuntimeError, match="^Unknown configuration section\\.$"):
+        with dispatch.configuration_section("synthetic-private-section"):
+            pytest.fail("Unallowlisted section must not be accepted")
+
+
+def test_storage_whitespace_normalization_remains_unchanged():
+    environment = cloud_environment()
+    url = environment["ADVISOR_DATABASE_URL"]
+    environment["ADVISOR_DATABASE_URL"] = " \n" + url + "\t "
+    storage, _, _ = dispatch.preflight(environment)
+    assert storage.database_url == url
 
 
 @pytest.mark.parametrize(
