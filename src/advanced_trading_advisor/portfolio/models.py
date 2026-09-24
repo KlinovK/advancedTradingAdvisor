@@ -25,6 +25,10 @@ class AccountType(StrEnum):
     MANUAL = "manual"
 
 
+DEFAULT_MANUAL_ACCOUNT_ID = UUID("00000000-0000-0000-0000-000000000001")
+DEFAULT_MANUAL_ACCOUNT_NAME = "Manual Portfolio"
+
+
 @dataclass(frozen=True, slots=True)
 class Account:
     id: UUID
@@ -48,25 +52,6 @@ class Portfolio:
     accounts: tuple[Account, ...]
 
     def __post_init__(self):
-        # Temporary bridge for aggregate-only CLI and snapshot codecs. Remove when they
-        # construct account-backed portfolios; no aggregate is stored alongside accounts.
-        if (
-            isinstance(self.accounts, tuple)
-            and self.accounts
-            and all(isinstance(value, AssetPosition) for value in self.accounts)
-        ):
-            object.__setattr__(
-                self,
-                "accounts",
-                (
-                    Account(
-                        UUID("00000000-0000-0000-0000-000000000001"),
-                        "Manually entered aggregate",
-                        AccountType.MANUAL,
-                        tuple(sorted(self.accounts, key=lambda position: position.symbol)),
-                    ),
-                ),
-            )
         items(self.accounts, Account)
         require(
             len({account.id for account in self.accounts}) == len(self.accounts),

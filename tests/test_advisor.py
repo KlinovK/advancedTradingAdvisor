@@ -1,8 +1,9 @@
 import asyncio
 import json
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from test_portfolio_risk import NOW, asset, market, order, state
@@ -16,12 +17,21 @@ from advanced_trading_advisor.analysis.result import AnalysisResultCodec
 from advanced_trading_advisor.analysis.use_case import AnalyzeCurrentPortfolio
 from advanced_trading_advisor.cli.main import main
 from advanced_trading_advisor.cli.report import render_analysis
-from advanced_trading_advisor.domain.persistence import FailureCategory
+from advanced_trading_advisor.domain.persistence import FailureCategory, UpdateType
 from advanced_trading_advisor.market.errors import MarketDataError
 from advanced_trading_advisor.market.models import MarketAssetData
 from advanced_trading_advisor.market.regime import MarketRegime
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
-from advanced_trading_advisor.portfolio.models import LimitOrderStatus, TradingSide
+from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
+    AssetPosition,
+    LimitOrderStatus,
+    Portfolio,
+    TradingSide,
+)
 from advanced_trading_advisor.risk.assessment import PortfolioRiskPolicy
 from advanced_trading_advisor.storage.database import Database
 from advanced_trading_advisor.storage.repositories import (
@@ -271,6 +281,11 @@ def test_cli_setup_decline_validation_and_reopen(tmp_path):
     assert current(db) is None
     assert cli(db, *setup_args())[0] == 0
     assert current(db).revision == 1
+    manual_account = current(db).snapshot.portfolio.accounts[0]
+    assert manual_account.id == DEFAULT_MANUAL_ACCOUNT_ID
+    assert manual_account.name == DEFAULT_MANUAL_ACCOUNT_NAME
+    assert manual_account.type is AccountType.MANUAL
+    assert manual_account.positions == current(db).snapshot.portfolio.positions
     assert current(db).snapshot.financial_settings.target_expense_runway_months == 12
     assert cli(db, *setup_args())[0] == 1
     code, text = cli(db, "portfolio", "show")
@@ -337,12 +352,79 @@ def test_cli_replace_orders_and_filled_balances(tmp_path):
     )
     replaced = current(db)
     assert replaced.revision == 4 and replaced.snapshot.id != initial.snapshot.id
+    assert (
+        replaced.snapshot.portfolio.accounts[0].id
+        == initial.snapshot.portfolio.accounts[0].id
+        == DEFAULT_MANUAL_ACCOUNT_ID
+    )
     assert replaced.snapshot.orders == filled.snapshot.orders
     assert (
         asyncio.run(SQLiteSnapshotRepository(Database(db)).get(initial.snapshot.id))
         == initial.snapshot
     )
     assert "filled" in cli(db, "orders", "show")[1]
+
+
+def test_cli_full_balance_entry_cannot_flatten_other_accounts(tmp_path):
+    db = tmp_path / "advisor.sqlite"
+    assert cli(db, *setup_args())[0] == 0
+    assert (
+        cli(
+            db,
+            "orders",
+            "add",
+            "--asset",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "83",
+            "--quantity",
+            "1",
+        )[0]
+        == 0
+    )
+    previous = current(db)
+    wallet = Account(
+        UUID("22222222-2222-4222-8222-222222222222"),
+        "Wallet",
+        AccountType.EXTERNAL_WALLET,
+        (AssetPosition("BTC", D("0.5")),),
+    )
+    multi_account = replace(
+        previous.snapshot,
+        id=uuid4(),
+        confirmed_at=NOW + timedelta(seconds=1),
+        portfolio=Portfolio(previous.snapshot.portfolio.accounts + (wallet,)),
+    )
+    repository = SQLiteSnapshotRepository(Database(db))
+    saved = asyncio.run(
+        ConfirmedStateService(repository).confirm(
+            multi_account,
+            expected_revision=previous.revision,
+            previous_snapshot_id=previous.snapshot.id,
+            update_type=UpdateType.BALANCE_CORRECTION,
+        )
+    )
+
+    replace_code, replace_output = cli(
+        db, "portfolio", "replace", "--position", "BTC=10", "--expenses", "250"
+    )
+    fill_code, fill_output = cli(
+        db,
+        "orders",
+        "update",
+        str(saved.snapshot.orders[0].id),
+        "--status",
+        "filled",
+        "--position",
+        "BTC=10",
+    )
+
+    assert replace_code == fill_code == 1
+    assert "account-aware replacement is not available" in replace_output
+    assert "account-aware replacement is not available" in fill_output
+    assert current(db) == saved
 
 
 @pytest.mark.parametrize("status", ["cancelled", "expired"])

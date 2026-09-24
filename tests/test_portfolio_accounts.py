@@ -162,10 +162,6 @@ def test_accounts_must_be_an_immutable_tuple_of_accounts() -> None:
         Portfolio((binance,)).accounts = ()
 
 
-def test_temporary_aggregate_constructor_bridge_uses_one_manual_account() -> None:
-    existing = Portfolio((AssetPosition("BTC", Decimal("0.02")),))
-
-    assert len(existing.accounts) == 1
-    assert existing.accounts[0].type is AccountType.MANUAL
-    assert existing.accounts[0].positions == existing.positions
-    assert existing == Portfolio((AssetPosition("BTC", Decimal("0.02")),))
+def test_flat_position_constructor_is_rejected() -> None:
+    with pytest.raises(DomainValidationError, match="Collection must be a tuple"):
+        Portfolio((AssetPosition("BTC", Decimal("0.02")),))

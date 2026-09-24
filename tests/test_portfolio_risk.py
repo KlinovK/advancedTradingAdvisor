@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -22,6 +22,10 @@ from advanced_trading_advisor.market.regime import (
 from advanced_trading_advisor.market.service import MarketDataService
 from advanced_trading_advisor.portfolio.calculator import PortfolioCalculator, market_symbols
 from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     FinancialSettings,
@@ -61,10 +65,46 @@ def state(positions=(("BTC", "100"), ("USDC", "4000")), orders=()):
     return ConfirmedPortfolioSnapshot(
         uuid4(),
         NOW,
-        Portfolio(tuple(AssetPosition(s, D(q)) for s, q in positions)),
+        Portfolio(
+            (
+                Account(
+                    DEFAULT_MANUAL_ACCOUNT_ID,
+                    DEFAULT_MANUAL_ACCOUNT_NAME,
+                    AccountType.MANUAL,
+                    tuple(AssetPosition(s, D(q)) for s, q in positions),
+                ),
+            )
+        ),
         FinancialSettings(D("250")),
         orders,
     )
+
+
+def test_valuation_uses_derived_balances_from_multiple_accounts() -> None:
+    original = state(())
+    manual = Account(
+        DEFAULT_MANUAL_ACCOUNT_ID,
+        DEFAULT_MANUAL_ACCOUNT_NAME,
+        AccountType.MANUAL,
+        (AssetPosition("BTC", D("0.8")), AssetPosition("USDC", D("100"))),
+    )
+    wallet = Account(
+        UUID("22222222-2222-4222-8222-222222222222"),
+        "Wallet",
+        AccountType.EXTERNAL_WALLET,
+        (AssetPosition("BTC", D("2.7")), AssetPosition("USDC", D("50"))),
+    )
+    snapshot = replace(original, portfolio=Portfolio((manual, wallet)))
+
+    valuation = PortfolioCalculator().calculate(
+        snapshot, market(asset("BTC", price="100"), asset("USDC", price="1")), now=NOW
+    )
+
+    assert valuation.assets[0].symbol == "BTC"
+    assert valuation.assets[0].quantity == D("3.5")
+    assert valuation.total_portfolio_usd == D("500")
+    assert valuation.current_stables_usd == D("150")
+    assert snapshot.portfolio.accounts == (manual, wallet)
 
 
 def order(

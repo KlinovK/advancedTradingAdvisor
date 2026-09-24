@@ -22,6 +22,10 @@ from advanced_trading_advisor.domain.persistence import (
 )
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     FinancialSettings,
@@ -54,8 +58,15 @@ def pg_snapshot(at=NOW):
         at,
         Portfolio(
             (
-                AssetPosition("BTC", Decimal("0.019800000000000000")),
-                AssetPosition("USDC", Decimal("3450.00")),
+                Account(
+                    DEFAULT_MANUAL_ACCOUNT_ID,
+                    DEFAULT_MANUAL_ACCOUNT_NAME,
+                    AccountType.MANUAL,
+                    (
+                        AssetPosition("BTC", Decimal("0.019800000000000000")),
+                        AssetPosition("USDC", Decimal("3450.00")),
+                    ),
+                ),
             )
         ),
         FinancialSettings(Decimal("250"), Decimal("12")),

@@ -24,6 +24,10 @@ from advanced_trading_advisor.domain.persistence import (
 from advanced_trading_advisor.domain.validation import DomainValidationError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     FinancialSettings,
@@ -69,8 +73,15 @@ def snapshot():
         NOW.astimezone(timezone(timedelta(hours=3))),
         Portfolio(
             (
-                AssetPosition("BTC", Decimal("0.000000000000000000000000000000123456789")),
-                AssetPosition("USDC", Decimal("123456789012345678901234567890.00100")),
+                Account(
+                    DEFAULT_MANUAL_ACCOUNT_ID,
+                    DEFAULT_MANUAL_ACCOUNT_NAME,
+                    AccountType.MANUAL,
+                    (
+                        AssetPosition("BTC", Decimal("0.000000000000000000000000000000123456789")),
+                        AssetPosition("USDC", Decimal("123456789012345678901234567890.00100")),
+                    ),
+                ),
             )
         ),
         FinancialSettings(Decimal("1000.0100"), Decimal("6.25")),

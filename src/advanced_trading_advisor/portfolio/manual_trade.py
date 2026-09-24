@@ -14,6 +14,8 @@ from advanced_trading_advisor.domain.validation import require
 
 from .confirmed_state import ConfirmedStateService
 from .models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     LimitOrderStatus,
@@ -144,7 +146,20 @@ class SpotTradeCalculator:
     ) -> SpotTradeCalculation:
         require(isinstance(snapshot, ConfirmedPortfolioSnapshot), "Confirmed snapshot required.")
         require(isinstance(trade, ExecutedSpotTrade), "Executed spot trade required.")
-        holdings = {position.symbol: position.amount for position in snapshot.portfolio.positions}
+        manual_account = next(
+            (
+                account
+                for account in snapshot.portfolio.accounts
+                if account.id == DEFAULT_MANUAL_ACCOUNT_ID and account.type is AccountType.MANUAL
+            ),
+            None,
+        )
+        require(
+            manual_account is not None,
+            "Manual trade requires the default MANUAL account; no account was changed.",
+        )
+        holdings = {position.symbol: position.amount for position in manual_account.positions}
+        aggregate = {position.symbol: position.amount for position in snapshot.portfolio.positions}
         asset_before = holdings.get(trade.asset, ZERO)
         stable_before = holdings.get(trade.settlement_asset, ZERO)
 
@@ -167,7 +182,7 @@ class SpotTradeCalculator:
                     None,
                 )
                 require(
-                    core is None or asset_after >= core.hard_floor,
+                    core is None or aggregate.get(trade.asset, ZERO) - quantity >= core.hard_floor,
                     f"SELL would violate the configured {trade.asset} core hard floor.",
                 )
                 stable_credit = trade.net_stable_credit
@@ -177,7 +192,7 @@ class SpotTradeCalculator:
 
         positions = []
         emitted = set()
-        for position in snapshot.portfolio.positions:
+        for position in manual_account.positions:
             amount = holdings[position.symbol]
             emitted.add(position.symbol)
             if amount > ZERO:
@@ -186,7 +201,13 @@ class SpotTradeCalculator:
             if symbol not in emitted and holdings.get(symbol, ZERO) > ZERO:
                 positions.append(AssetPosition(symbol, holdings[symbol]))
                 emitted.add(symbol)
-        portfolio = Portfolio(tuple(positions))
+        updated_account = replace(manual_account, positions=tuple(positions))
+        portfolio = Portfolio(
+            tuple(
+                updated_account if account.id == manual_account.id else account
+                for account in snapshot.portfolio.accounts
+            )
+        )
         return SpotTradeCalculation(
             portfolio,
             quantity,

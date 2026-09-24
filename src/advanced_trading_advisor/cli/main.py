@@ -23,6 +23,10 @@ from advanced_trading_advisor.portfolio.manual_trade import (
     RecordManualSpotTrade,
 )
 from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     CorePosition,
@@ -142,7 +146,26 @@ def balances(args):
         symbol = parse_symbol(symbol)
         require(symbol in SYMBOL_IDS, "Supported assets: BTC ETH SOL USDT USDC.")
         values.append(AssetPosition(symbol, parse_decimal(amount, positive=True)))
-    return Portfolio(tuple(values))
+    return Portfolio(
+        (
+            Account(
+                DEFAULT_MANUAL_ACCOUNT_ID,
+                DEFAULT_MANUAL_ACCOUNT_NAME,
+                AccountType.MANUAL,
+                tuple(values),
+            ),
+        )
+    )
+
+
+def require_manual_only_portfolio(portfolio: Portfolio) -> None:
+    require(
+        len(portfolio.accounts) == 1
+        and portfolio.accounts[0].id == DEFAULT_MANUAL_ACCOUNT_ID
+        and portfolio.accounts[0].type is AccountType.MANUAL,
+        "Full-balance entry requires only the default MANUAL account; "
+        "account-aware replacement is not available yet.",
+    )
 
 
 def _settlement_stable(snapshot, input_fn) -> str:
@@ -530,6 +553,8 @@ class CLI:
         elif args.command == "setup" or args.command == "portfolio":
             if args.command == "setup":
                 require(current is None, "Portfolio already exists; use portfolio replace.")
+            else:
+                require_manual_only_portfolio(current.snapshot.portfolio)
             snapshot = ConfirmedPortfolioSnapshot(
                 uuid4(),
                 at,
@@ -569,6 +594,7 @@ class CLI:
                 )
                 status = LimitOrderStatus(args.status)
                 if status is LimitOrderStatus.FILLED:
+                    require_manual_only_portfolio(previous.portfolio)
                     require(
                         args.position is not None or args.empty,
                         "FILLED requires full reconciled balances via --position or --empty; "

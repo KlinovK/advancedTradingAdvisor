@@ -3,12 +3,13 @@ import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Context, Decimal, localcontext
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from advanced_trading_advisor.cli.main import main, manual_trade_input
 from advanced_trading_advisor.domain.persistence import ConflictError, UpdateType
+from advanced_trading_advisor.domain.validation import DomainValidationError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.manual_trade import (
     ExecutedSpotTrade,
@@ -16,6 +17,10 @@ from advanced_trading_advisor.portfolio.manual_trade import (
     SpotTradeCalculator,
 )
 from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     CorePosition,
@@ -44,7 +49,16 @@ def state(
     return ConfirmedPortfolioSnapshot(
         uuid4(),
         NOW,
-        Portfolio(tuple(AssetPosition(symbol, D(amount)) for symbol, amount in positions)),
+        Portfolio(
+            (
+                Account(
+                    DEFAULT_MANUAL_ACCOUNT_ID,
+                    DEFAULT_MANUAL_ACCOUNT_NAME,
+                    AccountType.MANUAL,
+                    tuple(AssetPosition(symbol, D(amount)) for symbol, amount in positions),
+                ),
+            )
+        ),
         FinancialSettings(D("250"), D("12")),
         tuple(orders),
         tuple(cores),
@@ -98,6 +112,108 @@ def test_buy_and_sell_fee_semantics() -> None:
     assert sold.stable_balance_change == D("164")
     assert amounts(sold.portfolio)["USDC"] == D("1773")
     assert amounts(sold.portfolio)["SOL"] == D("2.0")
+
+
+@pytest.mark.parametrize(
+    "trade,expected_manual_sol,expected_manual_usdc,expected_aggregate_sol,expected_aggregate_usdc",
+    [
+        (
+            buy(),
+            D("5.0463917525773195876288659793814432990"),
+            D("1459"),
+            D("7.0463917525773195876288659793814432990"),
+            D("1959"),
+        ),
+        (sell(), D("2.0"), D("1774.0"), D("4.0"), D("2274.0")),
+    ],
+)
+def test_trade_changes_only_default_manual_account_and_preserves_other_accounts(
+    trade,
+    expected_manual_sol,
+    expected_manual_usdc,
+    expected_aggregate_sol,
+    expected_aggregate_usdc,
+) -> None:
+    original = state()
+    binance = Account(
+        UUID("11111111-1111-4111-8111-111111111111"),
+        "Binance",
+        AccountType.BINANCE,
+        (AssetPosition("SOL", D("2")), AssetPosition("USDC", D("500"))),
+    )
+    wallet = Account(
+        UUID("22222222-2222-4222-8222-222222222222"),
+        "Wallet",
+        AccountType.EXTERNAL_WALLET,
+        (AssetPosition("BTC", D("0.1")),),
+    )
+    original = replace(
+        original,
+        portfolio=Portfolio((binance, original.portfolio.accounts[0], wallet)),
+    )
+
+    result = SpotTradeCalculator().calculate(original, trade)
+
+    assert result.portfolio.accounts[0] is binance
+    assert result.portfolio.accounts[2] is wallet
+    assert result.portfolio.accounts[1].id == DEFAULT_MANUAL_ACCOUNT_ID
+    manual = amounts(Portfolio((result.portfolio.accounts[1],)))
+    assert manual["SOL"] == expected_manual_sol
+    assert manual["USDC"] == expected_manual_usdc
+    assert amounts(result.portfolio)["SOL"] == expected_aggregate_sol
+    assert amounts(result.portfolio)["USDC"] == expected_aggregate_usdc
+
+
+def test_trade_does_not_borrow_inventory_or_cash_from_other_accounts() -> None:
+    original = state(positions=(("SOL", "0.5"), ("USDC", "100")))
+    binance = Account(
+        UUID("11111111-1111-4111-8111-111111111111"),
+        "Binance",
+        AccountType.BINANCE,
+        (AssetPosition("SOL", D("5")), AssetPosition("USDC", D("1000"))),
+    )
+    original = replace(original, portfolio=Portfolio((original.portfolio.accounts[0], binance)))
+
+    with pytest.raises(DomainValidationError, match="Insufficient USDC"):
+        SpotTradeCalculator().calculate(original, buy())
+    with pytest.raises(DomainValidationError, match="Insufficient SOL"):
+        SpotTradeCalculator().calculate(original, sell())
+
+
+def test_trade_without_default_manual_account_fails_closed() -> None:
+    original = state()
+    binance = Account(
+        UUID("11111111-1111-4111-8111-111111111111"),
+        "Binance",
+        AccountType.BINANCE,
+        original.portfolio.accounts[0].positions,
+    )
+    original = replace(original, portfolio=Portfolio((binance,)))
+
+    with pytest.raises(DomainValidationError, match="requires the default MANUAL account"):
+        SpotTradeCalculator().calculate(original, buy())
+
+
+def test_core_floor_remains_a_portfolio_wide_constraint() -> None:
+    original = state()
+    binance = Account(
+        UUID("11111111-1111-4111-8111-111111111111"),
+        "Binance",
+        AccountType.BINANCE,
+        (AssetPosition("SOL", D("2")),),
+    )
+    original = replace(
+        original,
+        portfolio=Portfolio((original.portfolio.accounts[0], binance)),
+        core_positions=(CorePosition("SOL", D("4"), D("4.5")),),
+    )
+
+    result = SpotTradeCalculator().calculate(original, sell(quantity="1.5"))
+
+    assert amounts(result.portfolio)["SOL"] == D("4")
+    assert result.portfolio.accounts[1] is binance
+    with pytest.raises(DomainValidationError, match="core hard floor"):
+        SpotTradeCalculator().calculate(original, sell(quantity="1.6"))
 
 
 @pytest.mark.parametrize(

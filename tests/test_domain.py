@@ -10,6 +10,10 @@ from advanced_trading_advisor.analysis.recommendations import ActionType, Recomm
 from advanced_trading_advisor.domain.numeric import parse_decimal, parse_symbol
 from advanced_trading_advisor.domain.validation import DomainValidationError
 from advanced_trading_advisor.portfolio.models import (
+    DEFAULT_MANUAL_ACCOUNT_ID,
+    DEFAULT_MANUAL_ACCOUNT_NAME,
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     FinancialSettings,
@@ -42,7 +46,16 @@ def snapshot(**changes):
     args = dict(
         id=uuid4(),
         confirmed_at=NOW,
-        portfolio=Portfolio((AssetPosition("BTC", D("0.01")),)),
+        portfolio=Portfolio(
+            (
+                Account(
+                    DEFAULT_MANUAL_ACCOUNT_ID,
+                    DEFAULT_MANUAL_ACCOUNT_NAME,
+                    AccountType.MANUAL,
+                    (AssetPosition("BTC", D("0.01")),),
+                ),
+            )
+        ),
         financial_settings=FinancialSettings(D("1000"), D("6")),
         orders=(),
     )
@@ -118,9 +131,11 @@ def test_invalid_numeric_text(value):
 def test_portfolio_duplicates_and_collection_types():
     p = AssetPosition("BTC", D("1"))
     with pytest.raises(DomainValidationError):
-        Portfolio((p, p))
+        Account(DEFAULT_MANUAL_ACCOUNT_ID, "Manual", AccountType.MANUAL, (p, p))
     with pytest.raises(DomainValidationError):
         Portfolio([p])
+    with pytest.raises(DomainValidationError):
+        Portfolio((p,))
     with pytest.raises(DomainValidationError):
         Portfolio(("BTC",))
     assert Portfolio(()).positions == ()
