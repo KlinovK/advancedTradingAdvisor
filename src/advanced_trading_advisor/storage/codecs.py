@@ -14,6 +14,8 @@ from advanced_trading_advisor.domain.persistence import (
 )
 from advanced_trading_advisor.domain.validation import timestamp
 from advanced_trading_advisor.portfolio.models import (
+    Account,
+    AccountType,
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     CorePosition,
@@ -25,6 +27,7 @@ from advanced_trading_advisor.portfolio.models import (
 )
 
 PAYLOAD_VERSION = 1
+SNAPSHOT_PAYLOAD_VERSION = 3
 
 
 def boundary(function):
@@ -140,15 +143,25 @@ class SnapshotCodec:
             raise ValueError("Snapshot required.")
         return dump(
             {
-                "schema_version": 2 if snapshot.core_positions else 1,
+                "schema_version": SNAPSHOT_PAYLOAD_VERSION,
                 "kind": "snapshot",
                 "data": {
                     "id": str(snapshot.id),
                     "confirmed_at": utc_text(snapshot.confirmed_at),
-                    "positions": [
-                        {"symbol": p.symbol, "amount": format(p.amount, "f")}
-                        for p in snapshot.portfolio.positions
-                    ],
+                    "portfolio": {
+                        "accounts": [
+                            {
+                                "id": str(account.id),
+                                "name": account.name,
+                                "type": account.type.value,
+                                "positions": [
+                                    {"symbol": p.symbol, "amount": format(p.amount, "f")}
+                                    for p in account.positions
+                                ],
+                            }
+                            for account in snapshot.portfolio.accounts
+                        ]
+                    },
                     "financial_settings": {
                         "monthly_expenses_usd": format(
                             snapshot.financial_settings.monthly_expenses_usd, "f"
@@ -173,21 +186,15 @@ class SnapshotCodec:
                         }
                         for o in snapshot.orders
                     ],
-                    **(
+                    "core_positions": [
                         {
-                            "core_positions": [
-                                {
-                                    "symbol": c.symbol,
-                                    "hard_floor": format(c.hard_floor, "f"),
-                                    "preferred_quantity": format(c.preferred_quantity, "f"),
-                                    "policy_version": c.policy_version,
-                                }
-                                for c in snapshot.core_positions
-                            ]
+                            "symbol": c.symbol,
+                            "hard_floor": format(c.hard_floor, "f"),
+                            "preferred_quantity": format(c.preferred_quantity, "f"),
+                            "policy_version": c.policy_version,
                         }
-                        if snapshot.core_positions
-                        else {}
-                    ),
+                        for c in snapshot.core_positions
+                    ],
                 },
             },
         )
@@ -199,18 +206,33 @@ class SnapshotCodec:
         if (
             root["kind"] != "snapshot"
             or type(root["schema_version"]) is not int
-            or root["schema_version"] not in {1, 2}
+            or root["schema_version"] != SNAPSHOT_PAYLOAD_VERSION
         ):
             raise ValueError("Unsupported snapshot payload.")
         data = strict_object(
             root["data"],
-            {"id", "confirmed_at", "positions", "financial_settings", "orders"}
-            | ({"core_positions"} if root["schema_version"] == 2 else set()),
+            {"id", "confirmed_at", "portfolio", "financial_settings", "orders", "core_positions"},
         )
-        positions = []
-        for item in array(data["positions"]):
-            p = strict_object(item, {"symbol", "amount"})
-            positions.append(AssetPosition(p["symbol"], parse_decimal(p["amount"], positive=True)))
+        portfolio = strict_object(data["portfolio"], {"accounts"})
+        accounts = []
+        for item in array(portfolio["accounts"]):
+            account = strict_object(item, {"id", "name", "type", "positions"})
+            positions = []
+            for entry in array(account["positions"]):
+                position = strict_object(entry, {"symbol", "amount"})
+                positions.append(
+                    AssetPosition(
+                        position["symbol"], parse_decimal(position["amount"], positive=True)
+                    )
+                )
+            accounts.append(
+                Account(
+                    uid(account["id"]),
+                    account["name"],
+                    AccountType(account["type"]),
+                    tuple(positions),
+                )
+            )
         settings = strict_object(
             data["financial_settings"], {"monthly_expenses_usd", "target_expense_runway_months"}
         )
@@ -244,7 +266,7 @@ class SnapshotCodec:
                 )
             )
         cores = []
-        for item in array(data.get("core_positions", [])):
+        for item in array(data["core_positions"]):
             c = strict_object(
                 item, {"symbol", "hard_floor", "preferred_quantity", "policy_version"}
             )
@@ -259,7 +281,7 @@ class SnapshotCodec:
         return ConfirmedPortfolioSnapshot(
             uid(data["id"]),
             date(data["confirmed_at"]),
-            Portfolio(tuple(positions)),
+            Portfolio(tuple(accounts)),
             FinancialSettings(
                 parse_decimal(settings["monthly_expenses_usd"], positive=True),
                 parse_decimal(settings["target_expense_runway_months"], positive=True),

@@ -160,7 +160,9 @@ def test_snapshot_codec_exact_round_trip():
     )
     payload = json.loads(encoded)
     assert payload["data"]["confirmed_at"] == utc_text(NOW)
-    assert payload["data"]["positions"][1]["amount"] == "123456789012345678901234567890.00100"
+    assert payload["data"]["portfolio"]["accounts"][0]["positions"][1]["amount"] == (
+        "123456789012345678901234567890.00100"
+    )
     assert {o.status for o in restored.orders} == set(LimitOrderStatus)
     assert {o.side for o in restored.orders} == set(TradingSide)
 
@@ -168,16 +170,16 @@ def test_snapshot_codec_exact_round_trip():
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda p: p.update(schema_version=3),
+        lambda p: p.update(schema_version=4),
         lambda p: p.update(schema_version=True),
         lambda p: p.update(kind="other"),
         lambda p: p["data"].update(id="not-a-uuid"),
         lambda p: p["data"].update(confirmed_at="2026-09-09T12:30:00"),
-        lambda p: p["data"].update(positions=None),
-        lambda p: p["data"]["positions"][0].update(amount=0.01),
-        lambda p: p["data"]["positions"][0].update(amount="NaN"),
-        lambda p: p["data"]["positions"][0].update(amount="-1"),
-        lambda p: p["data"]["positions"][0].update(amount="0"),
+        lambda p: p["data"].update(portfolio=None),
+        lambda p: p["data"]["portfolio"]["accounts"][0]["positions"][0].update(amount=0.01),
+        lambda p: p["data"]["portfolio"]["accounts"][0]["positions"][0].update(amount="NaN"),
+        lambda p: p["data"]["portfolio"]["accounts"][0]["positions"][0].update(amount="-1"),
+        lambda p: p["data"]["portfolio"]["accounts"][0]["positions"][0].update(amount="0"),
         lambda p: p["data"]["orders"][0].update(side="short"),
         lambda p: p["data"]["orders"][0].update(status="unknown"),
         lambda p: p["data"].update(unexpected=True),
