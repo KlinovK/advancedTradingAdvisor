@@ -1,15 +1,14 @@
-"""One bounded plain-text message from a final persisted AnalysisResult."""
+"""One bounded, human-readable Telegram message from a persisted AnalysisResult."""
 
 import re
 from datetime import UTC
 
-from advanced_trading_advisor.analysis.active import TelegramSeverity
 from advanced_trading_advisor.analysis.recommendations import ActionType
 from advanced_trading_advisor.analysis.result import AnalysisResult
 from advanced_trading_advisor.domain.numeric import calculation_context
 
 MAX_MESSAGE_LENGTH = 4096
-FOOTER = "No trades were executed. Confirm portfolio/order changes after executing them manually."
+FOOTER = "No trades were executed automatically."
 PASSIVE = {
     ActionType.HOLD,
     ActionType.WAIT,
@@ -26,9 +25,20 @@ ACTION_NAMES = {
     ActionType.KEEP_LIMIT_ORDER: "KEEP LIMIT ORDER",
     ActionType.CANCEL_LIMIT_ORDER: "CANCEL LIMIT ORDER",
     ActionType.REPLACE_LIMIT_ORDER: "REPLACE LIMIT ORDER",
-    ActionType.REBALANCE: "REBALANCE",
-    ActionType.REBALANCE_INFORMATIONAL: "REBALANCE (INFORMATIONAL)",
+    ActionType.REBALANCE: "REBALANCE — informational",
+    ActionType.REBALANCE_INFORMATIONAL: "REBALANCE — informational",
 }
+WARNING_LABELS = {
+    "stable_reserve_deficit": "Cash reserve below required level",
+    "no_deployable_stables": "No cash available to deploy",
+    "buy_commitments_exceed_stables": "Open buy orders exceed available cash",
+    "sell_quantity_exceeds_holdings": "Open sell orders exceed holdings",
+    "excessive_asset_concentration": "High asset concentration",
+    "incomplete_market_data": "Incomplete market data",
+    "core_floor_conflicts_with_open_sell": "Open sell order conflicts with core position",
+    "candidate_plan_rejected": "Trading advice unavailable; review the full analysis",
+}
+INTERNAL_REASON = "proposal passed whole-plan checks against the recorded snapshot"
 
 
 def message_units(text):
@@ -53,136 +63,163 @@ def plain(text, limit=240):
     return " ".join(kept)
 
 
-def decimal(value):
-    return format(value, "f")
+def money(value):
+    return f"${value:,.2f}"
+
+
+def one_decimal(value):
+    return f"{value:.1f}"
+
+
+def warning_label(value):
+    if value in WARNING_LABELS:
+        return WARNING_LABELS[value]
+    if re.fullmatch(r"[a-z][a-z0-9_]*", value):
+        return plain(value.replace("_", " "), 120).capitalize()
+    return plain(value, 120)
 
 
 def action_block(action):
-    name = ACTION_NAMES[action.action_type]
-    prefix = "RECOMMEND: " if action.action_type not in PASSIVE else ""
-    lines = [f"{action.asset or 'PORTFOLIO'} — {prefix}{name}"]
-    if action.existing_order_id is not None:
-        lines.append(f"Existing order ID: {action.existing_order_id}")
-    if action.setup_id is not None:
-        lines.append(f"Setup ID: {action.setup_id}")
+    lines = [f"{action.asset or 'PORTFOLIO'} — {ACTION_NAMES[action.action_type]}"]
     if action.side is not None:
         lines.append(f"Side: {action.side.value.upper()}")
-    if action.target_price is not None:
-        lines.append(f"Target: ${decimal(action.target_price)}")
     if action.quantity_asset is not None:
-        lines.append(f"Quantity: {decimal(action.quantity_asset)}")
+        lines.append(f"Quantity: {format(action.quantity_asset, 'f')}")
+    if action.target_price is not None:
+        # This is an executable term: preserve every decimal place instead of rounding it.
+        lines.append(f"Limit price: ${format(action.target_price, ',f')}")
     if action.target_price is not None and action.quantity_asset is not None:
         with calculation_context():
-            lines.append(f"Approx value: ${decimal(action.target_price * action.quantity_asset)}")
+            lines.append(f"Approx value: {money(action.target_price * action.quantity_asset)}")
+    if action.setup_id is not None:
+        lines.append(f"Setup ID: {action.setup_id}")
+    if action.existing_order_id is not None:
+        lines.append(f"Existing order ID: {action.existing_order_id}")
     lines.append(f"Priority: P{action.priority}")
-    lines.append(f"Reason: {plain(action.reason)}")
+    if action.invalidation_condition is not None:
+        lines.append(f"Invalidation: {plain(action.invalidation_condition)}")
+    if action.review_at is not None:
+        lines.append(f"Review: {action.review_at.astimezone(UTC):%b %d, %H:%M UTC}")
+    if action.expires_at is not None:
+        lines.append(f"Expires: {action.expires_at.astimezone(UTC):%b %d, %H:%M UTC}")
+    if INTERNAL_REASON not in action.reason.casefold():
+        lines.append(f"Why: {plain(action.reason)}")
     return "\n".join(lines)
 
 
-def format_analysis(result: AnalysisResult) -> str:
-    if result.active is not None and result.active.severity is TelegramSeverity.QUIET:
-        kept = sum(a.action_type is ActionType.KEEP_LIMIT_ORDER for a in result.recommendations)
-        lines = [
-            "NO TRADING ACTION NEEDED",
-            f"Market: {result.market_regime.value.upper()}",
-            "Portfolio unchanged; no validated setup merits a trade.",
-            f"Existing orders kept: {kept}.",
-            "Next review: ~4h.",
+def _market_decisions(result):
+    if result.active is not None and "candidate_plan_rejected" not in result.warnings:
+        return [
+            f"{decision.asset}: {decision.decision.value.upper().replace('_', ' ')}"
+            if decision.decision.value != "rebalance_informational"
+            else f"{decision.asset}: REBALANCE — informational"
+            for decision in result.active.asset_decisions
         ]
-        if result.reasoning_mode.value == "AI_FALLBACK":
-            lines.append("Reasoning: AI fallback")
-        if result.ai_warning:
-            lines.append(result.ai_warning)
-        lines.extend(f"Warning: {plain(warning)}" for warning in result.warnings)
-        lines.append(FOOTER)
-        message = "\n".join(lines)
-        if message_units(message) > MAX_MESSAGE_LENGTH:
-            raise ValueError("Telegram quiet report exceeds the message limit.")
-        return message
+    seen = set()
+    actionable_assets = {
+        action.asset for action in result.recommendations if action.action_type not in PASSIVE
+    }
+    lines = []
+    for action in result.recommendations:
+        if (
+            action.asset is not None
+            and action.asset not in seen
+            and action.asset not in actionable_assets
+            and action.action_type in PASSIVE
+        ):
+            seen.add(action.asset)
+            lines.append(f"{action.asset}: {ACTION_NAMES[action.action_type]}")
+    return lines
+
+
+def format_analysis(result: AnalysisResult) -> str:
     f = result.financial
-    generated = result.generated_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    actionable = tuple(a for a in result.recommendations if a.action_type not in PASSIVE)
     cutoff = (
-        result.market_cutoff.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        result.market_cutoff.astimezone(UTC).strftime("%b %d, %H:%M UTC")
         if result.market_cutoff
         else "unavailable"
     )
     reasoning = {
-        "DETERMINISTIC": "Deterministic",
-        "AI_ASSISTED": "AI-assisted",
-        "AI_FALLBACK": "AI fallback",
+        "DETERMINISTIC": "Deterministic analysis",
+        "AI_ASSISTED": "AI-assisted analysis",
+        "AI_FALLBACK": "AI fallback — deterministic analysis",
     }[result.reasoning_mode.value]
-    trigger_lines = []
+    summary = [
+        "MARKET UPDATE",
+        "Action required" if actionable else "No action required",
+        "",
+        "Portfolio",
+        money(f.total_portfolio_usd),
+        f"Cash: {money(f.current_stables_usd)} ({one_decimal(f.stable_allocation_percent)}%)",
+        "",
+        "Reserve",
+        f"Required: {money(f.recommended_minimum_stables_usd)}",
+        f"Available to deploy: {money(f.deployable_stables_usd)}",
+        f"Runway: {one_decimal(f.actual_expense_runway_months)} months",
+    ]
+    if f.stable_reserve_deficit_usd > 0:
+        summary.append(f"Deficit: {money(f.stable_reserve_deficit_usd)}")
+    summary.extend(("", "Market", f"Regime: {result.market_regime.value.upper()}"))
+    decisions = _market_decisions(result)
+    summary.extend(decisions[:6])
+    if len(decisions) > 6:
+        summary.append(f"{len(decisions) - 6} more asset decisions in the full analysis.")
+    kept_orders = sum(
+        action.action_type is ActionType.KEEP_LIMIT_ORDER for action in result.recommendations
+    )
+    if kept_orders:
+        summary.append(f"Open orders kept: {kept_orders}")
     if result.active is not None:
-        trigger_lines = [
-            f"{s.asset} {s.setup_type.value.upper()}: {s.status.value.upper()}"
+        setups = [
+            f"{s.asset}: {s.setup_type.value.upper()} — {s.status.value.replace('_', ' ')}"
             for s in result.active.setups
             if s.trigger is not None
             and s.status.value
             in {"zone_touched", "awaiting_confirmation", "confirmed", "invalidated", "expired"}
-        ][:3]
-    header = "\n".join(
-        [
-            "MARKET UPDATE — NO TRADE"
-            if result.active is not None and result.active.severity is TelegramSeverity.UPDATE
-            else "ADVANCED TRADING ADVISOR — ACTION"
-            if result.active is not None
-            else "ADVANCED TRADING ADVISOR",
-            generated,
-            "",
-            "PORTFOLIO",
-            f"Value: ${decimal(f.total_portfolio_usd)}",
-            f"Stables: ${decimal(f.current_stables_usd)} ({decimal(f.stable_allocation_percent)}%)",
-            "",
-            "RESERVE",
-            f"Required: ${decimal(f.recommended_minimum_stables_usd)}",
-            f"Deployable: ${decimal(f.deployable_stables_usd)}",
-            f"Deficit: ${decimal(f.stable_reserve_deficit_usd)}",
-            f"Runway: {decimal(f.actual_expense_runway_months)} months",
-            "",
-            "MARKET",
-            f"Regime: {result.market_regime.value.upper()}",
-            f"Candle: {cutoff}",
-            f"Reasoning: {reasoning}",
-            *(["", "SWING TRIGGERS", *trigger_lines] if trigger_lines else []),
-            "",
-            "ACTIONS",
         ]
-    )
-    if message_units(header) + message_units(FOOTER) + 80 > MAX_MESSAGE_LENGTH:
-        raise ValueError("Telegram report header exceeds the message limit.")
-    actions = sorted(
-        enumerate(result.recommendations),
-        key=lambda pair: (pair[1].action_type in PASSIVE, pair[1].priority, pair[0]),
-    )
-    selected = []
-    omitted_actions = 0
+        if setups:
+            summary.extend(("", "Setups", *setups[:6]))
+            if len(setups) > 6:
+                summary.append(f"{len(setups) - 6} more setups in the full analysis.")
     warnings = list(result.warnings)
     if result.ai_warning:
         warnings.append(result.ai_warning)
-    reserve = 100  # Space for an omission count, warnings heading and advisory footer.
-    for _, action in actions:
+    summary_text = "\n".join(summary)
+    footer = f"Market data: {cutoff}\n{reasoning}\n\n{FOOTER}"
+    sorted_actions = sorted(enumerate(actionable), key=lambda pair: (pair[1].priority, pair[0]))
+    selected = []
+    omitted_actions = 0
+
+    def render(warning_lines):
+        warning_section = "Warnings\n" + ("\n".join(warning_lines) if warning_lines else "None")
+        action_section = "ACTION NOW\n" + (
+            "\n\n".join(selected)
+            if selected
+            else "See the full analysis for actions."
+            if omitted_actions
+            else "NONE"
+        )
+        if omitted_actions:
+            action_section += f"\n{omitted_actions} action(s) omitted; see the full analysis."
+        return "\n\n".join((summary_text, warning_section, action_section, footer))
+
+    for _, action in sorted_actions:
         block = action_block(action)
-        candidate = "\n\n".join((header, *selected, block))
-        if message_units(candidate) + message_units(FOOTER) + reserve <= MAX_MESSAGE_LENGTH:
-            selected.append(block)
-        else:
+        selected.append(block)
+        if message_units(render(())) + 100 > MAX_MESSAGE_LENGTH:
+            selected.pop()
             omitted_actions += 1
-    lines = [header, *selected]
-    if omitted_actions:
-        lines.append(f"{omitted_actions} action(s) omitted for message length.")
-    if warnings:
-        lines.append("WARNINGS")
+    warning_lines = []
     omitted_warnings = 0
     for warning in warnings:
-        block = "- " + plain(warning)
-        if message_units("\n\n".join((*lines, block, FOOTER))) + reserve <= MAX_MESSAGE_LENGTH:
-            lines.append(block)
-        else:
+        warning_lines.append(warning_label(warning))
+        if message_units(render(warning_lines)) + 60 > MAX_MESSAGE_LENGTH:
+            warning_lines.pop()
             omitted_warnings += 1
     if omitted_warnings:
-        lines.append(f"{omitted_warnings} warning(s) omitted for message length.")
-    lines.append(FOOTER)
-    message = "\n\n".join(lines)
+        warning_lines.append(f"{omitted_warnings} warning(s) omitted; see the full analysis.")
+    message = render(warning_lines)
     if message_units(message) > MAX_MESSAGE_LENGTH:
-        raise ValueError("Telegram message exceeds the size limit.")
+        raise ValueError("Telegram report exceeds the message limit.")
     return message

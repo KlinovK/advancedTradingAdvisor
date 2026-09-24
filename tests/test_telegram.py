@@ -15,6 +15,7 @@ from test_advisor import FakeProvider, fixture
 from test_portfolio_risk import CUTOFF, NOW
 from test_scheduler import Clock, Provider, prepared
 
+from advanced_trading_advisor.analysis.active import TelegramSeverity
 from advanced_trading_advisor.analysis.engine import advice
 from advanced_trading_advisor.analysis.models import AnalysisRunStatus
 from advanced_trading_advisor.analysis.reasoning import AI_WARNING, ReasoningMode
@@ -139,7 +140,7 @@ def test_process_environment_overrides_optional_local_dotenv(tmp_path, monkeypat
     assert configured.bot_token == TOKEN and configured.chat_id == CHAT
 
 
-def test_formatter_covers_all_actions_exact_decimals_ids_and_advisory(tmp_path):
+def test_formatter_covers_all_actions_exact_terms_ids_and_advisory(tmp_path):
     _, _, base = run(completed(tmp_path / "advisor.sqlite"))
     order_id = uuid4()
     actions = (
@@ -195,25 +196,21 @@ def test_formatter_covers_all_actions_exact_decimals_ids_and_advisory(tmp_path):
     assert all(
         name in message
         for name in (
-            "PORTFOLIO",
-            "RESERVE",
-            "MARKET",
+            "Portfolio",
+            "Reserve",
+            "Market",
             "BUY",
             "SELL",
-            "HOLD",
-            "WAIT",
             "PLACE LIMIT ORDER",
-            "KEEP LIMIT ORDER",
             "CANCEL LIMIT ORDER",
             "REPLACE LIMIT ORDER",
-            "REBALANCE",
         )
     )
-    assert "Target: $96.40" in message and "Quantity: 0.518" in message
-    assert "Approx value: $49.93520" in message
-    assert str(order_id) in message and "RECOMMEND: CANCEL LIMIT ORDER" in message
+    assert "Limit price: $96.40" in message and "Quantity: 0.518" in message
+    assert "Approx value: $49.94" in message
+    assert str(order_id) in message and "BTC — CANCEL LIMIT ORDER" in message
     assert "ORDER CANCELLED" not in message and message.endswith(FOOTER)
-    assert f"Candle: {CUTOFF:%Y-%m-%d %H:%M} UTC" in message
+    assert f"Market data: {CUTOFF:%b %d, %H:%M UTC}" in message
 
 
 def test_formatter_ai_modes_warnings_links_and_length(tmp_path):
@@ -227,13 +224,21 @@ def test_formatter_ai_modes_warnings_links_and_length(tmp_path):
         active=None,
     )
     message = format_analysis(fallback)
-    assert "Reasoning: AI fallback" in message and AI_WARNING in message
+    assert "AI fallback — deterministic analysis" in message and AI_WARNING in message
     assisted = replace(fallback, reasoning_mode=ReasoningMode.AI_ASSISTED, ai_warning=None)
-    assert "Reasoning: AI-assisted" in format_analysis(assisted)
+    assert "AI-assisted analysis" in format_analysis(assisted)
     long_reason = "Please see https://malicious.invalid/path @someone " + "word " * 300
     actions = tuple(
         replace(
-            advice(base.snapshot_id, "BTC", ActionType.HOLD, long_reason),
+            advice(
+                base.snapshot_id,
+                "BTC",
+                ActionType.PLACE_LIMIT_ORDER,
+                long_reason,
+                side=TradingSide.BUY,
+                price=Decimal("96.40"),
+                quantity=Decimal("0.518"),
+            ),
             recommendation_id=uuid4(),
             priority=1 if index == 0 else 5,
         )
@@ -250,6 +255,79 @@ def test_formatter_ai_modes_warnings_links_and_length(tmp_path):
     )
     emoji_message = format_analysis(replace(base, recommendations=emoji_actions, active=None))
     assert message_units(emoji_message) <= MAX_MESSAGE_LENGTH
+
+
+def test_formatter_no_action_uses_human_money_warnings_and_actual_cutoff(tmp_path):
+    _, _, base = run(completed(tmp_path / "advisor.sqlite"))
+    financial = replace(
+        base.financial,
+        total_portfolio_usd=Decimal("14382.175737360114732987188"),
+        current_stables_usd=Decimal("2595.5207790470166301"),
+        stable_allocation_percent=Decimal("18.046788"),
+        recommended_minimum_stables_usd=Decimal("1320"),
+        deployable_stables_usd=Decimal("1275.52"),
+        actual_expense_runway_months=Decimal("12.9776038952350831505"),
+    )
+    result = replace(
+        base,
+        financial=financial,
+        recommendations=(advice(base.snapshot_id, "BTC", ActionType.HOLD, "hold"),),
+        warnings=("excessive_asset_concentration", "unknown_risk_signal"),
+        active=None,
+    )
+    message = format_analysis(result)
+    assert message.startswith("MARKET UPDATE\nNo action required")
+    assert "$14,382.18" in message
+    assert "Cash: $2,595.52 (18.0%)" in message
+    assert "Required: $1,320.00" in message
+    assert "Available to deploy: $1,275.52" in message
+    assert "Runway: 13.0 months" in message
+    assert "BTC: HOLD" in message
+    assert "High asset concentration" in message
+    assert "Unknown risk signal" in message
+    assert "ACTION NOW\nNONE" in message
+    assert f"Market data: {CUTOFF:%b %d, %H:%M UTC}" in message
+    assert message.endswith("No trades were executed automatically.")
+    assert "Stables:" not in message and "Deployable:" not in message
+
+    quiet = replace(result, active=replace(base.active, severity=TelegramSeverity.QUIET))
+    quiet_message = format_analysis(quiet)
+    assert quiet_message.startswith("MARKET UPDATE\nNo action required")
+    assert "Cash: $2,595.52 (18.0%)" in quiet_message
+    assert "ACTION NOW\nNONE" in quiet_message
+
+
+def test_formatter_actionable_preserves_exact_execution_terms_without_internal_prose(tmp_path):
+    _, _, base = run(completed(tmp_path / "advisor.sqlite"))
+    setup_id, order_id = uuid4(), uuid4()
+    action = replace(
+        advice(
+            base.snapshot_id,
+            "SOL",
+            ActionType.REPLACE_LIMIT_ORDER,
+            "REPLACE LIMIT ORDER proposal passed whole-plan checks against the recorded snapshot. "
+            "Review manually; nothing was executed.",
+            order_id=order_id,
+            setup_id=setup_id,
+            side=TradingSide.BUY,
+            price=Decimal("96.405"),
+            quantity=Decimal("0.5181234567"),
+            priority=1,
+        ),
+        invalidation_condition="Close below support",
+        review_at=CUTOFF,
+        expires_at=CUTOFF + timedelta(hours=4),
+    )
+    message = format_analysis(replace(base, recommendations=(action,), active=None))
+    assert "ACTION NOW\nSOL — REPLACE LIMIT ORDER" in message
+    assert "Side: BUY" in message and "Priority: P1" in message
+    assert "Quantity: 0.5181234567" in message
+    assert "Limit price: $96.405" in message
+    assert f"Setup ID: {setup_id}" in message
+    assert f"Existing order ID: {order_id}" in message
+    assert "Invalidation: Close below support" in message
+    assert "Review:" in message and "Expires:" in message
+    assert "proposal passed whole-plan checks" not in message
 
 
 def test_transport_success_plain_text_no_preview_or_parse_mode():

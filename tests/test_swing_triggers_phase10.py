@@ -389,7 +389,7 @@ def test_trigger_history_roundtrips_through_temp_db_and_result_codec(tmp_path):
         report = render_analysis(decoded)
         message = format_analysis(decoded)
         assert "Swing setups" in report and "execution_valid=yes" in report
-        assert "SWING TRIGGERS" in message and "CONFIRMED" in message
+        assert "Setups" in message and "SUPPORT_HOLD — confirmed" in message
 
         malformed = json.loads(stored.result_json)
         malformed["data"]["active"]["setups"][0]["trigger"]["confirmation_candle"]["unexpected"] = (
