@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import MAX_EMAX, MIN_EMIN, Decimal, Rounded, localcontext
 from enum import StrEnum
 from uuid import UUID
 
@@ -45,14 +45,56 @@ class Account:
 
 @dataclass(frozen=True, slots=True)
 class Portfolio:
-    positions: tuple[AssetPosition, ...]
+    accounts: tuple[Account, ...]
 
     def __post_init__(self):
-        items(self.positions, AssetPosition)
+        # Temporary bridge for aggregate-only CLI and snapshot codecs. Remove when they
+        # construct account-backed portfolios; no aggregate is stored alongside accounts.
+        if (
+            isinstance(self.accounts, tuple)
+            and self.accounts
+            and all(isinstance(value, AssetPosition) for value in self.accounts)
+        ):
+            object.__setattr__(
+                self,
+                "accounts",
+                (
+                    Account(
+                        UUID("00000000-0000-0000-0000-000000000001"),
+                        "Manually entered aggregate",
+                        AccountType.MANUAL,
+                        tuple(sorted(self.accounts, key=lambda position: position.symbol)),
+                    ),
+                ),
+            )
+        items(self.accounts, Account)
         require(
-            len({p.symbol for p in self.positions}) == len(self.positions),
-            "Position symbols must be unique.",
+            len({account.id for account in self.accounts}) == len(self.accounts),
+            "Account IDs must be unique within a portfolio.",
         )
+
+    @property
+    def positions(self) -> tuple[AssetPosition, ...]:
+        by_symbol: dict[str, list[Decimal]] = {}
+        for account in self.accounts:
+            for position in account.positions:
+                by_symbol.setdefault(position.symbol, []).append(position.amount)
+
+        positions = []
+        for asset_symbol, amounts in sorted(by_symbol.items()):
+            # Decimal addition is context-sensitive. This precision covers every input
+            # digit plus a carry from summing the values, independent of caller context.
+            minimum_exponent = min(amount.as_tuple().exponent for amount in amounts)
+            maximum_adjusted = max(amount.adjusted() for amount in amounts)
+            required_precision = maximum_adjusted - minimum_exponent + len(str(len(amounts))) + 1
+            with localcontext() as context:
+                context.prec = max(context.prec, required_precision)
+                context.Emax = MAX_EMAX
+                context.Emin = MIN_EMIN
+                context.traps[Rounded] = True
+                total = sum(amounts, Decimal(0))
+            positions.append(AssetPosition(asset_symbol, total))
+        return tuple(positions)
 
 
 @dataclass(frozen=True, slots=True)

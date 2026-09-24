@@ -559,9 +559,14 @@ def test_unsafe_whole_plans_use_identical_baseline(tmp_path, kind):
             s,
             portfolio=replace(
                 s.portfolio,
-                positions=tuple(
-                    replace(p, amount=D("50")) if p.symbol == "BTC" else p
-                    for p in s.portfolio.positions
+                accounts=(
+                    replace(
+                        s.portfolio.accounts[0],
+                        positions=tuple(
+                            replace(p, amount=D("50")) if p.symbol == "BTC" else p
+                            for p in s.portfolio.accounts[0].positions
+                        ),
+                    ),
                 ),
             ),
         )
