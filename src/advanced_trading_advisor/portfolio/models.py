@@ -18,6 +18,31 @@ class AssetPosition:
         finite_decimal(self.amount, positive=True)
 
 
+class AccountType(StrEnum):
+    BINANCE = "binance"
+    EXTERNAL_WALLET = "external_wallet"
+    OTHER_EXCHANGE = "other_exchange"
+    MANUAL = "manual"
+
+
+@dataclass(frozen=True, slots=True)
+class Account:
+    id: UUID
+    name: str
+    type: AccountType
+    positions: tuple[AssetPosition, ...]
+
+    def __post_init__(self):
+        identity(self.id)
+        require(isinstance(self.name, str) and bool(self.name.strip()), "Account name is required.")
+        require(isinstance(self.type, AccountType), "Invalid account type.")
+        items(self.positions, AssetPosition)
+        require(
+            len({position.symbol for position in self.positions}) == len(self.positions),
+            "Position symbols must be unique within an account.",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Portfolio:
     positions: tuple[AssetPosition, ...]
