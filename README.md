@@ -12,12 +12,15 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private portfolio HTTP read (Step 8B)
+## Private HTTP reads (Steps 8B–8C)
 
-The first ASGI slice exposes only authenticated `GET /v1/portfolio`. It reads the current
+The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
+`GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
 confirmed snapshot through `ConfirmedStateService`; it never initializes storage, changes
 portfolio state, or starts analysis or scheduling. Account holdings are authoritative, and
 `aggregate_positions` is derived for display. All financial decimals are JSON strings.
+Analysis routes use `AnalysisHistoryQuery` and preserve each run's historical snapshot ID;
+completed details include the decoded analysis and active setups. All four routes are read-only.
 
 Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
 `ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private

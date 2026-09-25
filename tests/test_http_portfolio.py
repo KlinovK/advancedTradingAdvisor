@@ -295,6 +295,7 @@ def test_production_composition_requires_postgres_without_connecting(monkeypatch
 
         class Bundle:
             snapshots = FakeSnapshots(None)
+            analyses = object()
 
         return Bundle()
 
@@ -320,6 +321,11 @@ def test_production_composition_requires_postgres_without_connecting(monkeypatch
     assert len(calls) == 1
 
 
-def test_no_other_http_routes_are_added() -> None:
+def test_only_portfolio_and_analysis_read_routes_are_added() -> None:
     app = app_with(FakeSnapshots(None))
-    assert [(route.path, route.methods) for route in app.routes] == [("/v1/portfolio", {"GET"})]
+    assert [(route.path, route.methods) for route in app.routes] == [
+        ("/v1/portfolio", {"GET"}),
+        ("/v1/analyses/latest", {"GET"}),
+        ("/v1/analyses", {"GET"}),
+        ("/v1/analyses/{run_id}", {"GET"}),
+    ]
