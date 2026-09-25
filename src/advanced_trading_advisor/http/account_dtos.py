@@ -1,4 +1,4 @@
-"""Transport shape for creating a confirmed portfolio account."""
+"""Transport shapes for confirmed portfolio account mutations."""
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
@@ -18,4 +18,18 @@ class CreateAccountInputDTO(BaseModel):
     expected_revision: StrictInt = Field(gt=0)
     name: StrictStr
     account_type: AccountType
+    positions: tuple[AccountPositionInputDTO, ...]
+
+
+class RenameAccountInputDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: StrictInt = Field(gt=0)
+    name: StrictStr
+
+
+class UpdateAccountHoldingsInputDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: StrictInt = Field(gt=0)
     positions: tuple[AccountPositionInputDTO, ...]

@@ -12,7 +12,7 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private HTTP portfolio and analysis API (Steps 8B–8D.2)
+## Private HTTP portfolio and analysis API (Steps 8B–8D.3)
 
 The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
 `GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
@@ -29,6 +29,13 @@ The server generates `account_id`; clients cannot provide it. A successful `201`
 complete updated portfolio, including its new revision and snapshot ID. A `409 revision_conflict`
 means reload authoritative state and review the outcome, not automatically retry the mutation.
 There is no HTTP idempotency key yet. Initial confirmed state must be bootstrapped separately.
+
+`PATCH /v1/portfolio/accounts/{account_id}` renames an existing account; its body requires
+`expected_revision` and `name`. `PUT /v1/portfolio/accounts/{account_id}/holdings` requires
+`expected_revision` and a complete `positions` array with decimal-string amounts. PUT replaces
+that account's holdings entirely, not as a delta or partial patch. Both routes use the account UUID
+in the path and return the complete updated portfolio (`200`). A `409 revision_conflict` on either
+means reload and review, never automatically retry the same mutation.
 
 Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
 `ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private

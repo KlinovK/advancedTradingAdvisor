@@ -18,11 +18,21 @@ from advanced_trading_advisor.domain.validation import DomainValidationError, Re
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.create_account import CreateAccount, CreateAccountCommand
 from advanced_trading_advisor.portfolio.models import AssetPosition
+from advanced_trading_advisor.portfolio.rename_account import RenameAccount, RenameAccountCommand
 from advanced_trading_advisor.portfolio.repositories import SnapshotRepository
+from advanced_trading_advisor.portfolio.update_account_holdings import (
+    UpdateAccountHoldings,
+    UpdateAccountHoldingsCommand,
+)
 from advanced_trading_advisor.storage.factory import create_storage
 from advanced_trading_advisor.storage.settings import StorageBackend, StorageSettings
 
-from .account_dtos import CreateAccountInputDTO
+from .account_dtos import (
+    AccountPositionInputDTO,
+    CreateAccountInputDTO,
+    RenameAccountInputDTO,
+    UpdateAccountHoldingsInputDTO,
+)
 from .analysis_dtos import AnalysisDetailDTO, RecentAnalysesDTO
 from .auth import APITokenSettings, UnauthorizedError, bearer_authentication
 from .dtos import CurrentPortfolioDTO
@@ -59,12 +69,23 @@ def write_error_response(error: Exception) -> JSONResponse:
     return error_response(500, "internal_error", "Portfolio could not be updated.")
 
 
+def positions_from_input(
+    positions: tuple[AccountPositionInputDTO, ...],
+) -> tuple[AssetPosition, ...]:
+    return tuple(
+        AssetPosition(position.symbol, parse_decimal(position.amount, positive=True))
+        for position in positions
+    )
+
+
 def create_app(
     *,
     environment: Mapping[str, str] | None = None,
     snapshots: SnapshotRepository | None = None,
     analyses: AnalysisRunRepository | None = None,
     create_account: CreateAccount | None = None,
+    rename_account: RenameAccount | None = None,
+    update_account_holdings: UpdateAccountHoldings | None = None,
 ) -> FastAPI:
     """Compose without connecting, initializing, or migrating storage.
 
@@ -88,6 +109,12 @@ def create_app(
 
     state = ConfirmedStateService(snapshots)
     account_creator = create_account if create_account is not None else CreateAccount(snapshots)
+    account_renamer = rename_account if rename_account is not None else RenameAccount(snapshots)
+    holdings_updater = (
+        update_account_holdings
+        if update_account_holdings is not None
+        else UpdateAccountHoldings(snapshots)
+    )
     history = AnalysisHistoryQuery(analyses) if analyses is not None else None
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     authenticate = bearer_authentication(token_settings)
@@ -123,16 +150,41 @@ def create_app(
                 account_id=uuid4(),
                 name=body.name,
                 account_type=body.account_type,
-                positions=tuple(
-                    AssetPosition(position.symbol, parse_decimal(position.amount, positive=True))
-                    for position in body.positions
-                ),
+                positions=positions_from_input(body.positions),
             )
             current = await account_creator.execute(command)
             payload = asdict(CurrentPortfolioDTO.from_domain(current))
         except Exception as error:
             return write_error_response(error)
         return JSONResponse(payload, status_code=201, headers={"Cache-Control": "no-store"})
+
+    @app.patch("/v1/portfolio/accounts/{account_id}", dependencies=[Depends(authenticate)])
+    async def rename_portfolio_account(
+        account_id: UUID, body: RenameAccountInputDTO
+    ) -> JSONResponse:
+        try:
+            current = await account_renamer.execute(
+                RenameAccountCommand(body.expected_revision, account_id, body.name)
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.put("/v1/portfolio/accounts/{account_id}/holdings", dependencies=[Depends(authenticate)])
+    async def replace_account_holdings(
+        account_id: UUID, body: UpdateAccountHoldingsInputDTO
+    ) -> JSONResponse:
+        try:
+            current = await holdings_updater.execute(
+                UpdateAccountHoldingsCommand(
+                    body.expected_revision, account_id, positions_from_input(body.positions)
+                )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @app.get("/v1/analyses/latest", dependencies=[Depends(authenticate)])
     async def latest_analysis() -> JSONResponse:
