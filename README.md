@@ -12,6 +12,26 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
+## Private portfolio HTTP read (Step 8B)
+
+The first ASGI slice exposes only authenticated `GET /v1/portfolio`. It reads the current
+confirmed snapshot through `ConfirmedStateService`; it never initializes storage, changes
+portfolio state, or starts analysis or scheduling. Account holdings are authoritative, and
+`aggregate_positions` is derived for display. All financial decimals are JSON strings.
+
+Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
+`ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private
+environment. The token must be nonblank and contain no whitespace. The HTTP factory does not
+load the project `.env`, and it refuses non-PostgreSQL production storage or a missing token.
+Do not place the token in source control or a command-line argument. Start the ASGI server with:
+
+```sh
+.venv/bin/uvicorn advanced_trading_advisor.http.app:create_app --factory --host 127.0.0.1
+```
+
+Use a trusted HTTPS termination layer before exposing this private endpoint remotely. No cloud
+deployment or public HTTP binding is configured by this step.
+
 All financial inputs are finite Decimal values. Positions, expenses, runway, prices and quantities
 must be strictly positive; omit zero-balance positions. An empty portfolio is allowed.
 CLI parsing helpers accept plain period-separated decimal text and never round input.
