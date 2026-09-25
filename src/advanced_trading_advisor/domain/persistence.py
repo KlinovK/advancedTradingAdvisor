@@ -28,6 +28,7 @@ class UpdateType(StrEnum):
     INITIAL_STATE = "initial_state"
     ACCOUNT_CREATED = "account_created"
     ACCOUNT_RENAMED = "account_renamed"
+    ACCOUNT_HOLDINGS_UPDATED = "account_holdings_updated"
     BALANCE_CORRECTION = "balance_correction"
     EXPENSE_SETTINGS_CHANGE = "expense_settings_change"
     CORE_CONFIGURATION_CHANGE = "core_configuration_change"
