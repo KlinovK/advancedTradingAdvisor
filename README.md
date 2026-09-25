@@ -12,7 +12,7 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private HTTP reads (Steps 8B–8C)
+## Private HTTP portfolio and analysis API (Steps 8B–8D.2)
 
 The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
 `GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
@@ -21,6 +21,14 @@ portfolio state, or starts analysis or scheduling. Account holdings are authorit
 `aggregate_positions` is derived for display. All financial decimals are JSON strings.
 Analysis routes use `AnalysisHistoryQuery` and preserve each run's historical snapshot ID;
 completed details include the decoded analysis and active setups. All four routes are read-only.
+
+`POST /v1/portfolio/accounts` is the first authenticated mutation. Its JSON body contains
+`expected_revision`, `name`, `account_type` (`binance`, `external_wallet`, `other_exchange`, or
+`manual`), and `positions` entries with a canonical `symbol` and decimal-string `amount`.
+The server generates `account_id`; clients cannot provide it. A successful `201` response is the
+complete updated portfolio, including its new revision and snapshot ID. A `409 revision_conflict`
+means reload authoritative state and review the outcome, not automatically retry the mutation.
+There is no HTTP idempotency key yet. Initial confirmed state must be bootstrapped separately.
 
 Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
 `ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private
