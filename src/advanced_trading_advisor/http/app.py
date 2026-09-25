@@ -18,6 +18,7 @@ from advanced_trading_advisor.domain.validation import DomainValidationError, Re
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.create_account import CreateAccount, CreateAccountCommand
 from advanced_trading_advisor.portfolio.models import AssetPosition
+from advanced_trading_advisor.portfolio.remove_account import RemoveAccount, RemoveAccountCommand
 from advanced_trading_advisor.portfolio.rename_account import RenameAccount, RenameAccountCommand
 from advanced_trading_advisor.portfolio.repositories import SnapshotRepository
 from advanced_trading_advisor.portfolio.update_account_holdings import (
@@ -30,6 +31,7 @@ from advanced_trading_advisor.storage.settings import StorageBackend, StorageSet
 from .account_dtos import (
     AccountPositionInputDTO,
     CreateAccountInputDTO,
+    DeleteAccountInputDTO,
     RenameAccountInputDTO,
     UpdateAccountHoldingsInputDTO,
 )
@@ -86,6 +88,7 @@ def create_app(
     create_account: CreateAccount | None = None,
     rename_account: RenameAccount | None = None,
     update_account_holdings: UpdateAccountHoldings | None = None,
+    remove_account: RemoveAccount | None = None,
 ) -> FastAPI:
     """Compose without connecting, initializing, or migrating storage.
 
@@ -115,6 +118,7 @@ def create_app(
         if update_account_holdings is not None
         else UpdateAccountHoldings(snapshots)
     )
+    account_remover = remove_account if remove_account is not None else RemoveAccount(snapshots)
     history = AnalysisHistoryQuery(analyses) if analyses is not None else None
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     authenticate = bearer_authentication(token_settings)
@@ -180,6 +184,19 @@ def create_app(
                 UpdateAccountHoldingsCommand(
                     body.expected_revision, account_id, positions_from_input(body.positions)
                 )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.delete("/v1/portfolio/accounts/{account_id}", dependencies=[Depends(authenticate)])
+    async def delete_portfolio_account(
+        account_id: UUID, body: DeleteAccountInputDTO
+    ) -> JSONResponse:
+        try:
+            current = await account_remover.execute(
+                RemoveAccountCommand(body.expected_revision, account_id)
             )
             payload = asdict(CurrentPortfolioDTO.from_domain(current))
         except Exception as error:

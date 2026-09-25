@@ -12,7 +12,7 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private HTTP portfolio and analysis API (Steps 8B–8D.3)
+## Private HTTP portfolio and analysis API (Steps 8B–8D.4)
 
 The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
 `GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
@@ -36,6 +36,11 @@ There is no HTTP idempotency key yet. Initial confirmed state must be bootstrapp
 that account's holdings entirely, not as a delta or partial patch. Both routes use the account UUID
 in the path and return the complete updated portfolio (`200`). A `409 revision_conflict` on either
 means reload and review, never automatically retry the same mutation.
+
+Authenticated `DELETE /v1/portfolio/accounts/{account_id}` takes a JSON body containing only
+`expected_revision` and returns the complete updated portfolio (`200`). It cannot remove the final
+account or an account referenced by a retained order; no order is deleted or changed as a side
+effect. A `409 revision_conflict` requires reload and review, not automatic retry.
 
 Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
 `ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private

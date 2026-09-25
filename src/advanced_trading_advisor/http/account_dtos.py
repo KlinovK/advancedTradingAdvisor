@@ -33,3 +33,9 @@ class UpdateAccountHoldingsInputDTO(BaseModel):
 
     expected_revision: StrictInt = Field(gt=0)
     positions: tuple[AccountPositionInputDTO, ...]
+
+
+class DeleteAccountInputDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: StrictInt = Field(gt=0)
