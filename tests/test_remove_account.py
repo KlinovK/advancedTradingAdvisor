@@ -6,8 +6,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
     DEFAULT_MANUAL_ACCOUNT_ID,
@@ -173,7 +179,7 @@ def test_any_referenced_order_blocks_removal_without_changing_orders(tmp_path, s
             orders=original.orders + (order(WALLET_ORDER_ID, WALLET_ID, status),),
         )
         before = await ConfirmedStateService(snapshots).initialize(original)
-        with pytest.raises(DomainValidationError, match="referenced orders"):
+        with pytest.raises(StateConflictError):
             await RemoveAccount(snapshots).execute(command())
         assert await snapshots.get_current() == before
         assert (await snapshots.get_current()).snapshot.orders == original.orders
@@ -210,7 +216,7 @@ def test_last_account_cannot_be_removed(tmp_path) -> None:
             core_positions=(),
         )
         before = await ConfirmedStateService(snapshots).initialize(original)
-        with pytest.raises(DomainValidationError, match="last account"):
+        with pytest.raises(StateConflictError):
             await RemoveAccount(snapshots).execute(command(account_id=DEFAULT_MANUAL_ACCOUNT_ID))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -222,7 +228,7 @@ def test_unknown_account_cannot_be_removed(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match="Account does not exist"):
+        with pytest.raises(ResourceNotFoundError):
             await RemoveAccount(snapshots).execute(command(account_id=UNKNOWN_ID))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -233,7 +239,7 @@ def test_unknown_account_cannot_be_removed(tmp_path) -> None:
 def test_no_current_portfolio_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await RemoveAccount(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -244,7 +250,7 @@ def test_stale_revision_does_not_create_snapshot_audit_or_pointer_move(tmp_path)
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await RemoveAccount(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

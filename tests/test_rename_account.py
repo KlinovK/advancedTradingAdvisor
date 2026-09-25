@@ -5,8 +5,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
     DEFAULT_MANUAL_ACCOUNT_ID,
@@ -150,19 +156,19 @@ def test_duplicate_names_and_exact_label_text_are_allowed(tmp_path, name) -> Non
 
 
 @pytest.mark.parametrize(
-    "changes,match",
+    "changes,error_type",
     [
-        ({"name": ""}, "Account name is required"),
-        ({"name": " \t "}, "Account name is required"),
-        ({"account_id": UNKNOWN_ID}, "Account does not exist"),
-        ({"name": "Binance"}, "Account name is unchanged"),
+        ({"name": ""}, DomainValidationError),
+        ({"name": " \t "}, DomainValidationError),
+        ({"account_id": UNKNOWN_ID}, ResourceNotFoundError),
+        ({"name": "Binance"}, StateConflictError),
     ],
 )
-def test_invalid_or_noop_rename_creates_no_revision(tmp_path, changes, match) -> None:
+def test_invalid_or_noop_rename_creates_no_revision(tmp_path, changes, error_type) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match=match):
+        with pytest.raises(error_type):
             await RenameAccount(snapshots).execute(command(**changes))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -173,7 +179,7 @@ def test_invalid_or_noop_rename_creates_no_revision(tmp_path, changes, match) ->
 def test_missing_current_state_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await RenameAccount(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -184,7 +190,7 @@ def test_stale_revision_has_no_snapshot_audit_or_pointer_movement(tmp_path) -> N
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await RenameAccount(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

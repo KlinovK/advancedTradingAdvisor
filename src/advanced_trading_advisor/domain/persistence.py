@@ -16,6 +16,14 @@ class ConflictError(PersistenceError):
     """An immutable identity or current revision conflicts."""
 
 
+class RevisionConflictError(ConflictError):
+    """The confirmed portfolio changed since the caller's expected revision."""
+
+
+class StateConflictError(ConflictError):
+    """A well-formed portfolio mutation conflicts with current state."""
+
+
 class SchemaVersionError(PersistenceError):
     """Database schema is unsupported or incompatible."""
 

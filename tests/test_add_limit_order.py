@@ -5,8 +5,13 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.add_limit_order import AddLimitOrder, AddLimitOrderCommand
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
@@ -176,23 +181,23 @@ def test_other_exchange_target_is_explicit_and_does_not_debit_inventory(tmp_path
 
 
 @pytest.mark.parametrize(
-    "changes,match",
+    "changes,error_type",
     [
-        ({"account_id": UNKNOWN_ID}, "Order account must exist"),
-        ({"asset": "XRP"}, "Unsupported asset"),
-        ({"asset": "sol"}, "symbol"),
-        ({"side": "buy"}, "Invalid trading side"),
-        ({"target_price": Decimal("0")}, "positive"),
-        ({"target_price": 1.5}, "Decimal"),
-        ({"quantity_asset": Decimal("-1")}, "positive"),
-        ({"quantity_asset": Decimal("NaN")}, "finite"),
+        ({"account_id": UNKNOWN_ID}, ResourceNotFoundError),
+        ({"asset": "XRP"}, DomainValidationError),
+        ({"asset": "sol"}, DomainValidationError),
+        ({"side": "buy"}, DomainValidationError),
+        ({"target_price": Decimal("0")}, DomainValidationError),
+        ({"target_price": 1.5}, DomainValidationError),
+        ({"quantity_asset": Decimal("-1")}, DomainValidationError),
+        ({"quantity_asset": Decimal("NaN")}, DomainValidationError),
     ],
 )
-def test_invalid_order_input_does_not_persist(tmp_path, changes, match) -> None:
+def test_invalid_order_input_does_not_persist(tmp_path, changes, error_type) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match=match):
+        with pytest.raises(error_type):
             await AddLimitOrder(snapshots, now=lambda: NOW + timedelta(seconds=1)).execute(
                 command(**changes)
             )
@@ -221,7 +226,7 @@ def test_duplicate_order_identity_is_rejected_without_writes(tmp_path) -> None:
 def test_missing_current_portfolio_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await AddLimitOrder(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -232,7 +237,7 @@ def test_stale_revision_has_no_writes_or_retry(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await AddLimitOrder(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

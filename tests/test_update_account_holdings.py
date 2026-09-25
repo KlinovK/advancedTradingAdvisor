@@ -5,8 +5,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
     DEFAULT_MANUAL_ACCOUNT_ID,
@@ -193,9 +199,9 @@ def test_empty_holdings_are_valid_for_an_account_without_core_inventory(tmp_path
 
 
 @pytest.mark.parametrize(
-    "changes,match",
+    "changes,error_type",
     [
-        ({"account_id": UNKNOWN_ID}, "Account does not exist"),
+        ({"account_id": UNKNOWN_ID}, ResourceNotFoundError),
         (
             {
                 "positions": (
@@ -203,22 +209,22 @@ def test_empty_holdings_are_valid_for_an_account_without_core_inventory(tmp_path
                     AssetPosition("BTC", Decimal("2")),
                 )
             },
-            "unique within an account",
+            DomainValidationError,
         ),
-        ({"positions": initial_snapshot().portfolio.accounts[1].positions}, "unchanged"),
+        ({"positions": initial_snapshot().portfolio.accounts[1].positions}, StateConflictError),
         (
             {"positions": (AssetPosition("ETH", Decimal("0.9")),)},
-            "Confirmed core floor exceeds current holdings",
+            DomainValidationError,
         ),
     ],
 )
 def test_rejected_update_creates_no_snapshot_audit_or_pointer_movement(
-    tmp_path, changes, match
+    tmp_path, changes, error_type
 ) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match=match):
+        with pytest.raises(error_type):
             await UpdateAccountHoldings(snapshots).execute(command(**changes))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -236,7 +242,7 @@ def test_invalid_asset_position_uses_existing_decimal_rules() -> None:
 def test_missing_current_state_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await UpdateAccountHoldings(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -247,7 +253,7 @@ def test_stale_revision_has_no_writes_or_retry(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await UpdateAccountHoldings(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

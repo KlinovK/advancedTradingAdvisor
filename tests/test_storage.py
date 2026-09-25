@@ -18,6 +18,7 @@ from advanced_trading_advisor.domain.persistence import (
     FailureCategory,
     PayloadError,
     PersistenceError,
+    RevisionConflictError,
     SchemaVersionError,
     UpdateType,
 )
@@ -295,10 +296,10 @@ def test_confirm_reopen_revision_and_audit(tmp_path):
         assert audit[1].update_type is UpdateType.INITIAL_STATE
         assert await repo.list_recent(1) == (second,)
         assert await repo.get(first.id) == first
-        with pytest.raises(ConflictError):
+        with pytest.raises(RevisionConflictError):
             await service.initialize(snapshot())
         stale = replace(second, id=uuid4())
-        with pytest.raises(ConflictError):
+        with pytest.raises(RevisionConflictError):
             await service.confirm(
                 stale,
                 expected_revision=1,
@@ -357,7 +358,7 @@ def test_competing_confirmations_only_one_commits(tmp_path):
             ),
             return_exceptions=True,
         )
-        assert sum(isinstance(value, ConflictError) for value in outcomes) == 1
+        assert sum(isinstance(value, RevisionConflictError) for value in outcomes) == 1
         assert (await repo.get_current()).revision == 2
         assert len(await repo.list_recent()) == 2
         assert len(await SQLiteConfirmedUpdateRepository(db).list_recent()) == 2

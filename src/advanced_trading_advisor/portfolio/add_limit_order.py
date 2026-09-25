@@ -6,8 +6,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import identity, require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, identity, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import LimitOrder, LimitOrderStatus, TradingSide
@@ -50,15 +54,14 @@ class AddLimitOrder:
     async def execute(self, command: AddLimitOrderCommand) -> CurrentPortfolio:
         require(isinstance(command, AddLimitOrderCommand), "Add limit order command required.")
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
-        require(
-            any(
-                account.id == command.account_id for account in current.snapshot.portfolio.accounts
-            ),
-            "Order account must exist in the confirmed portfolio.",
-        )
+            raise RevisionConflictError("Current state changed; reload before confirming.")
+        if not any(
+            account.id == command.account_id for account in current.snapshot.portfolio.accounts
+        ):
+            raise ResourceNotFoundError("Order account must exist in the confirmed portfolio.")
 
         at = self._now()
         order = LimitOrder(

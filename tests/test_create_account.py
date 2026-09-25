@@ -5,8 +5,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.create_account import CreateAccount, CreateAccountCommand
 from advanced_trading_advisor.portfolio.models import (
@@ -148,10 +154,10 @@ def test_create_account_confirms_one_revision_and_preserves_all_other_state(tmp_
 
 
 @pytest.mark.parametrize(
-    "changes,match",
+    "changes,error_type",
     [
-        ({"account_id": BINANCE_ID}, "Account IDs must be unique"),
-        ({"name": " \t "}, "Account name is required"),
+        ({"account_id": BINANCE_ID}, StateConflictError),
+        ({"name": " \t "}, DomainValidationError),
         (
             {
                 "positions": (
@@ -159,16 +165,16 @@ def test_create_account_confirms_one_revision_and_preserves_all_other_state(tmp_
                     AssetPosition("ETH", Decimal("2")),
                 )
             },
-            "unique within an account",
+            DomainValidationError,
         ),
-        ({"account_type": "binance"}, "Invalid account type"),
+        ({"account_type": "binance"}, DomainValidationError),
     ],
 )
-def test_domain_rejection_creates_no_confirmed_state(tmp_path, changes, match) -> None:
+def test_domain_rejection_creates_no_confirmed_state(tmp_path, changes, error_type) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match=match):
+        with pytest.raises(error_type):
             await CreateAccount(snapshots).execute(command(**changes))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -191,7 +197,7 @@ def test_stale_revision_has_no_writes_or_automatic_retry(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await CreateAccount(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -202,7 +208,7 @@ def test_stale_revision_has_no_writes_or_automatic_retry(tmp_path) -> None:
 def test_no_current_state_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await CreateAccount(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 

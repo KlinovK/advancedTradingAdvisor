@@ -13,6 +13,7 @@ from advanced_trading_advisor.domain.persistence import (
     FailureCategory,
     PayloadError,
     PersistenceError,
+    RevisionConflictError,
     StoredAnalysisRun,
     UpdateType,
 )
@@ -207,7 +208,7 @@ class SQLiteSnapshotRepository:
             revision = existing.revision if existing else 0
             previous_id = existing.snapshot.id if existing else None
             if expected_revision != revision or update.previous_snapshot_id != previous_id:
-                raise ConflictError("Current state changed; reload before confirming.")
+                raise RevisionConflictError("Current state changed; reload before confirming.")
             if (
                 update.new_snapshot_id != snapshot.id
                 or update.confirmed_at != snapshot.confirmed_at
@@ -233,7 +234,7 @@ class SQLiteSnapshotRepository:
                     (str(snapshot.id), revision + 1, utc_text(snapshot.confirmed_at), 1, revision),
                 )
                 if cursor.rowcount != 1:
-                    raise ConflictError("Concurrent current-state update.")
+                    raise RevisionConflictError("Concurrent current-state update.")
             return CurrentPortfolio(snapshot, revision + 1)
 
 

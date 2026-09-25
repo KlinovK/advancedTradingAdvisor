@@ -5,8 +5,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
     DEFAULT_MANUAL_ACCOUNT_ID,
@@ -188,7 +194,7 @@ def test_equal_settings_are_noop_without_revision_or_audit(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match="Financial settings are unchanged"):
+        with pytest.raises(StateConflictError):
             await UpdateFinancialSettings(snapshots).execute(
                 command(
                     monthly_expenses_usd=Decimal("250.0"),
@@ -204,7 +210,7 @@ def test_equal_settings_are_noop_without_revision_or_audit(tmp_path) -> None:
 def test_no_current_portfolio_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await UpdateFinancialSettings(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -215,7 +221,7 @@ def test_stale_revision_has_no_writes_or_retry(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await UpdateFinancialSettings(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

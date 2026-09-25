@@ -16,8 +16,10 @@ from advanced_trading_advisor.delivery.models import DeliveryRecord, DeliverySta
 from advanced_trading_advisor.domain.persistence import (
     ConfirmedUpdate,
     ConflictError,
+    CurrentPortfolio,
     FailureCategory,
     PersistenceError,
+    RevisionConflictError,
     UpdateType,
 )
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
@@ -32,6 +34,7 @@ from advanced_trading_advisor.portfolio.models import (
     Portfolio,
 )
 from advanced_trading_advisor.scheduler.models import ScheduledExecution, ScheduledStatus
+from advanced_trading_advisor.storage import postgres_repositories
 from advanced_trading_advisor.storage.codecs import PAYLOAD_VERSION, SnapshotCodec, UpdateCodec
 from advanced_trading_advisor.storage.database import Database
 from advanced_trading_advisor.storage.factory import create_storage
@@ -41,6 +44,7 @@ from advanced_trading_advisor.storage.postgres_repositories import (
     DELIVERY_LOCK,
     PORTFOLIO_LOCK,
     SCHEDULER_LOCK,
+    PostgresSnapshotRepository,
 )
 from advanced_trading_advisor.storage.postgres_schema import (
     POSTGRES_COLUMNS,
@@ -50,6 +54,60 @@ from advanced_trading_advisor.storage.postgres_schema import (
 from advanced_trading_advisor.storage.settings import StorageBackend, StorageSettings
 
 NOW = datetime(2026, 9, 17, 12, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("stale_at", ["precheck", "pointer_update"])
+def test_postgres_confirmed_state_cas_uses_revision_conflict_offline(monkeypatch, stale_at):
+    current = pg_snapshot()
+    candidate = replace(current, id=uuid4(), confirmed_at=NOW + timedelta(seconds=1))
+    update = ConfirmedUpdate(
+        uuid4(), UpdateType.BALANCE_CORRECTION, current.id, candidate.id, candidate.confirmed_at
+    )
+    events = []
+
+    class FakeConnection:
+        async def execute(self, statement, *args):
+            events.append("pointer_update")
+            assert statement.startswith("UPDATE current_portfolio")
+            return "UPDATE 0"
+
+    class FakeDatabase:
+        @asynccontextmanager
+        async def transaction(self):
+            events.append("transaction_started")
+            yield FakeConnection()
+
+    async def fake_lock(connection, key):
+        events.append("lock")
+
+    async def fake_current(connection, *, lock=False):
+        assert lock is True
+        return CurrentPortfolio(current, 1)
+
+    async def fake_save(connection, snapshot):
+        events.append("save")
+
+    async def fake_append(connection, confirmed_update):
+        events.append("audit")
+
+    monkeypatch.setattr(postgres_repositories, "advisory_lock", fake_lock)
+    monkeypatch.setattr(postgres_repositories, "pg_current", fake_current)
+    monkeypatch.setattr(postgres_repositories, "pg_save_snapshot", fake_save)
+    monkeypatch.setattr(postgres_repositories, "pg_append_update", fake_append)
+
+    async def scenario():
+        with pytest.raises(RevisionConflictError):
+            await PostgresSnapshotRepository(FakeDatabase()).set_current(
+                candidate,
+                expected_revision=0 if stale_at == "precheck" else 1,
+                update=update,
+            )
+
+    asyncio.run(scenario())
+    if stale_at == "precheck":
+        assert events == ["transaction_started", "lock"]
+    else:
+        assert events == ["transaction_started", "lock", "save", "audit", "pointer_update"]
 
 
 def pg_snapshot(at=NOW):

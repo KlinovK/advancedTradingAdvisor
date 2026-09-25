@@ -5,8 +5,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import identity, require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, identity, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import Portfolio
@@ -41,20 +46,21 @@ class RemoveAccount:
     async def execute(self, command: RemoveAccountCommand) -> CurrentPortfolio:
         require(isinstance(command, RemoveAccountCommand), "Remove account command required.")
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
 
         accounts = current.snapshot.portfolio.accounts
         index = next(
             (i for i, account in enumerate(accounts) if account.id == command.account_id), None
         )
-        require(index is not None, "Account does not exist in the confirmed portfolio.")
-        require(len(accounts) > 1, "Cannot remove the last account.")
-        require(
-            not any(order.account_id == command.account_id for order in current.snapshot.orders),
-            "Account has referenced orders and cannot be removed.",
-        )
+        if index is None:
+            raise ResourceNotFoundError("Account does not exist in the confirmed portfolio.")
+        if len(accounts) <= 1:
+            raise StateConflictError("Cannot remove the last account.")
+        if any(order.account_id == command.account_id for order in current.snapshot.orders):
+            raise StateConflictError("Account has referenced orders and cannot be removed.")
 
         portfolio = Portfolio(accounts[:index] + accounts[index + 1 :])
         snapshot = replace(

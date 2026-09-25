@@ -5,8 +5,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import identity, require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, identity, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import LimitOrderStatus
@@ -45,9 +50,10 @@ class UpdateLimitOrderStatus:
             "Update limit order status command required.",
         )
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
         require(
             isinstance(command.target_status, LimitOrderStatus)
             and command.target_status in {LimitOrderStatus.CANCELLED, LimitOrderStatus.EXPIRED},
@@ -56,8 +62,10 @@ class UpdateLimitOrderStatus:
 
         previous = current.snapshot
         old = next((order for order in previous.orders if order.id == command.order_id), None)
-        require(old is not None, "Limit order does not exist in the confirmed portfolio.")
-        require(old.status is LimitOrderStatus.OPEN, "Only an OPEN order can be resolved.")
+        if old is None:
+            raise ResourceNotFoundError("Limit order does not exist in the confirmed portfolio.")
+        if old.status is not LimitOrderStatus.OPEN:
+            raise StateConflictError("Only an OPEN order can be resolved.")
         at = self._now()
         updated = replace(old, status=command.target_status, updated_at=at, resolved_at=at)
         snapshot = replace(

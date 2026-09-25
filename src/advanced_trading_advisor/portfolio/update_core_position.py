@@ -6,8 +6,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import CorePosition
@@ -43,9 +48,10 @@ class UpdateCorePosition:
     async def execute(self, command: UpdateCorePositionCommand) -> CurrentPortfolio:
         require(isinstance(command, UpdateCorePositionCommand), "Update core command required.")
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
 
         configured = CorePosition(
             command.symbol,
@@ -58,7 +64,8 @@ class UpdateCorePosition:
         cores = tuple(
             core for core in current.snapshot.core_positions if core.symbol != configured.symbol
         ) + (configured,)
-        require(cores != current.snapshot.core_positions, "Core configuration is unchanged.")
+        if cores == current.snapshot.core_positions:
+            raise StateConflictError("Core configuration is unchanged.")
         snapshot = replace(
             current.snapshot,
             id=self._identity_factory(),

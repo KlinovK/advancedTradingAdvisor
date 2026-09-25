@@ -6,8 +6,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import identity, require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, identity, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import (
@@ -59,19 +64,23 @@ class ConfirmLimitOrderFilled:
             "Confirm limit order filled command required.",
         )
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
 
         previous = current.snapshot
         order = next((item for item in previous.orders if item.id == command.order_id), None)
-        require(order is not None, "Limit order does not exist in the confirmed portfolio.")
-        require(order.status is LimitOrderStatus.OPEN, "Only an OPEN order can be filled.")
+        if order is None:
+            raise ResourceNotFoundError("Limit order does not exist in the confirmed portfolio.")
+        if order.status is not LimitOrderStatus.OPEN:
+            raise StateConflictError("Only an OPEN order can be filled.")
         accounts = previous.portfolio.accounts
         index = next(
             (i for i, account in enumerate(accounts) if account.id == order.account_id), None
         )
-        require(index is not None, "Order account does not exist in the confirmed portfolio.")
+        if index is None:
+            raise ResourceNotFoundError("Order account does not exist in the confirmed portfolio.")
 
         account = accounts[index]
         reconciled = replace(account, positions=command.positions)

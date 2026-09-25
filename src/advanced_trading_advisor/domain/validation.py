@@ -7,6 +7,10 @@ class DomainValidationError(ValueError):
     """Input violates a domain invariant."""
 
 
+class ResourceNotFoundError(DomainValidationError):
+    """A requested confirmed portfolio resource does not exist."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise DomainValidationError(message)

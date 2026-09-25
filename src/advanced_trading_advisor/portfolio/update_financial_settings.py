@@ -6,8 +6,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import FinancialSettings
@@ -45,17 +50,17 @@ class UpdateFinancialSettings:
             "Update financial settings command required.",
         )
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
 
         settings = FinancialSettings(
             command.monthly_expenses_usd,
             command.target_expense_runway_months,
         )
-        require(
-            settings != current.snapshot.financial_settings, "Financial settings are unchanged."
-        )
+        if settings == current.snapshot.financial_settings:
+            raise StateConflictError("Financial settings are unchanged.")
         snapshot = replace(
             current.snapshot,
             id=self._identity_factory(),

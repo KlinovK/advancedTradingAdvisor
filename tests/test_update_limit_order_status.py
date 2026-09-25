@@ -6,8 +6,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.models import (
     DEFAULT_MANUAL_ACCOUNT_ID,
@@ -191,19 +197,21 @@ def test_other_exchange_order_can_expire_without_manual_account_assumption(tmp_p
 
 
 @pytest.mark.parametrize(
-    "changes,match",
+    "changes,error_type",
     [
-        ({"order_id": UNKNOWN_ORDER_ID}, "Limit order does not exist"),
-        ({"target_status": LimitOrderStatus.FILLED}, "Only CANCELLED or EXPIRED"),
-        ({"target_status": LimitOrderStatus.OPEN}, "Only CANCELLED or EXPIRED"),
-        ({"target_status": "cancelled"}, "Only CANCELLED or EXPIRED"),
+        ({"order_id": UNKNOWN_ORDER_ID}, ResourceNotFoundError),
+        ({"target_status": LimitOrderStatus.FILLED}, DomainValidationError),
+        ({"target_status": LimitOrderStatus.OPEN}, DomainValidationError),
+        ({"target_status": "cancelled"}, DomainValidationError),
     ],
 )
-def test_unknown_or_unsupported_target_fails_without_persistence(tmp_path, changes, match) -> None:
+def test_unknown_or_unsupported_target_fails_without_persistence(
+    tmp_path, changes, error_type
+) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(DomainValidationError, match=match):
+        with pytest.raises(error_type):
             await UpdateLimitOrderStatus(snapshots).execute(command(**changes))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -229,7 +237,7 @@ def test_terminal_order_cannot_be_repeated_or_retargeted(
         terminal = replace(before.orders[1], status=source_status, resolved_at=NOW)
         before = replace(before, orders=(before.orders[0], terminal, before.orders[2]))
         current = await ConfirmedStateService(snapshots).initialize(before)
-        with pytest.raises(DomainValidationError, match="Only an OPEN order"):
+        with pytest.raises(StateConflictError):
             await UpdateLimitOrderStatus(snapshots).execute(command(target_status=target_status))
         assert await snapshots.get_current() == current
         assert await counts(database) == (1, 1, 1)
@@ -240,7 +248,7 @@ def test_terminal_order_cannot_be_repeated_or_retargeted(
 def test_missing_current_portfolio_fails_without_initializing(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await UpdateLimitOrderStatus(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -251,7 +259,7 @@ def test_stale_revision_has_no_writes_or_retry(tmp_path) -> None:
     async def scenario():
         database, snapshots = await disposable_storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(initial_snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await UpdateLimitOrderStatus(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

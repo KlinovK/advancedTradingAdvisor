@@ -6,8 +6,14 @@ from uuid import UUID
 
 import pytest
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import DomainValidationError
+from advanced_trading_advisor.domain.persistence import (
+    ConflictError,
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.confirm_limit_order_filled import (
     ConfirmLimitOrderFilled,
     ConfirmLimitOrderFilledCommand,
@@ -357,7 +363,7 @@ def test_invalid_account_positions_rejected_without_writes(tmp_path) -> None:
 def test_missing_current_portfolio_rejected(tmp_path) -> None:
     async def scenario():
         database, snapshots = await storage(tmp_path)
-        with pytest.raises(DomainValidationError, match="No confirmed portfolio"):
+        with pytest.raises(ResourceNotFoundError):
             await ConfirmLimitOrderFilled(snapshots).execute(command())
         assert await counts(database) == (0, 0, 0)
 
@@ -368,7 +374,7 @@ def test_unknown_or_terminal_order_rejected_without_writes(tmp_path) -> None:
     async def scenario():
         database, snapshots = await storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(snapshot())
-        with pytest.raises(DomainValidationError, match="Limit order does not exist"):
+        with pytest.raises(ResourceNotFoundError):
             await ConfirmLimitOrderFilled(snapshots).execute(command(order_id=UNKNOWN_ID))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)
@@ -376,7 +382,7 @@ def test_unknown_or_terminal_order_rejected_without_writes(tmp_path) -> None:
         filled = await ConfirmLimitOrderFilled(snapshots, now=lambda: CONFIRMED_AT).execute(
             command()
         )
-        with pytest.raises(DomainValidationError, match="Only an OPEN order"):
+        with pytest.raises(StateConflictError):
             await ConfirmLimitOrderFilled(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == filled
         assert await counts(database) == (2, 2, 1)
@@ -388,7 +394,7 @@ def test_stale_revision_rejected_without_writes(tmp_path) -> None:
     async def scenario():
         database, snapshots = await storage(tmp_path)
         before = await ConfirmedStateService(snapshots).initialize(snapshot())
-        with pytest.raises(ConflictError, match="reload before confirming"):
+        with pytest.raises(RevisionConflictError):
             await ConfirmLimitOrderFilled(snapshots).execute(command(expected_revision=2))
         assert await snapshots.get_current() == before
         assert await counts(database) == (1, 1, 1)

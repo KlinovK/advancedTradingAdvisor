@@ -5,8 +5,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import Account, AccountType, AssetPosition, Portfolio
@@ -43,11 +48,14 @@ class CreateAccount:
     async def execute(self, command: CreateAccountCommand) -> CurrentPortfolio:
         require(isinstance(command, CreateAccountCommand), "Create account command required.")
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
 
         account = Account(command.account_id, command.name, command.account_type, command.positions)
+        if any(existing.id == account.id for existing in current.snapshot.portfolio.accounts):
+            raise StateConflictError("Account ID already exists in the confirmed portfolio.")
         portfolio = Portfolio(current.snapshot.portfolio.accounts + (account,))
         snapshot = replace(
             current.snapshot,

@@ -5,8 +5,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from advanced_trading_advisor.domain.persistence import ConflictError, CurrentPortfolio, UpdateType
-from advanced_trading_advisor.domain.validation import identity, require
+from advanced_trading_advisor.domain.persistence import (
+    CurrentPortfolio,
+    RevisionConflictError,
+    StateConflictError,
+    UpdateType,
+)
+from advanced_trading_advisor.domain.validation import ResourceNotFoundError, identity, require
 
 from .confirmed_state import ConfirmedStateService
 from .models import AssetPosition, Portfolio
@@ -45,17 +50,20 @@ class UpdateAccountHoldings:
             "Update account holdings command required.",
         )
         current = await self._confirmed.load_current()
-        require(current is not None, "No confirmed portfolio; run initial setup first.")
+        if current is None:
+            raise ResourceNotFoundError("No confirmed portfolio; run initial setup first.")
         if command.expected_revision != current.revision:
-            raise ConflictError("Current state changed; reload before confirming.")
+            raise RevisionConflictError("Current state changed; reload before confirming.")
 
         accounts = current.snapshot.portfolio.accounts
         index = next(
             (i for i, account in enumerate(accounts) if account.id == command.account_id), None
         )
-        require(index is not None, "Account does not exist in the confirmed portfolio.")
+        if index is None:
+            raise ResourceNotFoundError("Account does not exist in the confirmed portfolio.")
         updated = replace(accounts[index], positions=command.positions)
-        require(updated != accounts[index], "Account holdings are unchanged.")
+        if updated == accounts[index]:
+            raise StateConflictError("Account holdings are unchanged.")
         portfolio = Portfolio(accounts[:index] + (updated,) + accounts[index + 1 :])
         snapshot = replace(
             current.snapshot,
