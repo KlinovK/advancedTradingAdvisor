@@ -65,6 +65,7 @@ def snapshot():
             NOW - timedelta(days=2),
             NOW - timedelta(days=1),
             None if status is LimitOrderStatus.OPEN else NOW - timedelta(days=1),
+            account_id=DEFAULT_MANUAL_ACCOUNT_ID,
         )
         for i, status in enumerate(LimitOrderStatus)
     )
@@ -181,7 +182,7 @@ def test_snapshot_codec_exact_round_trip():
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda p: p.update(schema_version=4),
+        lambda p: p.update(schema_version=5),
         lambda p: p.update(schema_version=True),
         lambda p: p.update(kind="other"),
         lambda p: p["data"].update(id="not-a-uuid"),

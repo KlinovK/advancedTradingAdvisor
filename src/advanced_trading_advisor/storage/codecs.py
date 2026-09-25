@@ -27,7 +27,7 @@ from advanced_trading_advisor.portfolio.models import (
 )
 
 PAYLOAD_VERSION = 1
-SNAPSHOT_PAYLOAD_VERSION = 3
+SNAPSHOT_PAYLOAD_VERSION = 4
 
 
 def boundary(function):
@@ -173,6 +173,7 @@ class SnapshotCodec:
                     "orders": [
                         {
                             "id": str(o.id),
+                            "account_id": str(o.account_id),
                             "asset": o.asset,
                             "side": o.side.value,
                             "target_price": format(o.target_price, "f"),
@@ -242,6 +243,7 @@ class SnapshotCodec:
                 item,
                 {
                     "id",
+                    "account_id",
                     "asset",
                     "side",
                     "target_price",
@@ -263,6 +265,7 @@ class SnapshotCodec:
                     date(o["created_at"]),
                     date(o["updated_at"]),
                     date(o["resolved_at"]) if o["resolved_at"] is not None else None,
+                    account_id=uid(o["account_id"]),
                 )
             )
         cores = []

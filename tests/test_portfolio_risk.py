@@ -120,6 +120,7 @@ def order(
         NOW,
         NOW,
         None if status is LimitOrderStatus.OPEN else NOW,
+        account_id=DEFAULT_MANUAL_ACCOUNT_ID,
     )
 
 

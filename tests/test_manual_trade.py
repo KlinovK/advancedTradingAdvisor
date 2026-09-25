@@ -87,6 +87,7 @@ def open_order(side=TradingSide.BUY, asset="SOL", price="90", quantity="20"):
         LimitOrderStatus.OPEN,
         NOW,
         NOW,
+        account_id=DEFAULT_MANUAL_ACCOUNT_ID,
     )
 
 

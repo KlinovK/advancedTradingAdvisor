@@ -26,11 +26,13 @@ from advanced_trading_advisor.portfolio.models import (
 
 D = Decimal
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
+WALLET_ACCOUNT_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 def order(**changes):
     args = dict(
         id=uuid4(),
+        account_id=DEFAULT_MANUAL_ACCOUNT_ID,
         asset="BTC",
         side=TradingSide.BUY,
         target_price=D("60000"),
@@ -170,6 +172,28 @@ def test_duplicate_order_ids_and_confirmation_time():
     ]:
         with pytest.raises(DomainValidationError):
             snapshot(**{field: value})
+
+
+def test_snapshot_orders_must_reference_existing_accounts():
+    manual = snapshot().portfolio.accounts[0]
+    wallet = Account(WALLET_ACCOUNT_ID, "Wallet", AccountType.EXTERNAL_WALLET, ())
+    portfolio = Portfolio((manual, wallet))
+    manual_order = order(account_id=manual.id)
+    another_manual_order = order(account_id=manual.id)
+    wallet_order = order(account_id=wallet.id)
+
+    assert snapshot(orders=()).orders == ()
+    assert snapshot(orders=(manual_order,)).orders == (manual_order,)
+    assert snapshot(orders=(manual_order, another_manual_order)).orders == (
+        manual_order,
+        another_manual_order,
+    )
+    assert snapshot(portfolio=portfolio, orders=(manual_order, wallet_order)).orders == (
+        manual_order,
+        wallet_order,
+    )
+    with pytest.raises(DomainValidationError, match="Order account must exist"):
+        snapshot(orders=(wallet_order,))
 
 
 @pytest.mark.parametrize("status", list(LimitOrderStatus))

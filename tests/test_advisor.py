@@ -292,6 +292,96 @@ def test_cli_setup_decline_validation_and_reopen(tmp_path):
     assert code == 0 and "BTC: 10" in text and "Revision: 1" in text
 
 
+def test_cli_order_add_requires_explicit_existing_account_id(tmp_path):
+    db = tmp_path / "advisor.sqlite"
+    assert cli(db, *setup_args())[0] == 0
+    terms = ("--asset", "BTC", "--side", "buy", "--price", "83", "--quantity", "1")
+    before = current(db)
+
+    with pytest.raises(SystemExit) as missing:
+        cli(db, "orders", "add", *terms)
+    assert missing.value.code == 2
+
+    unknown_id = UUID("22222222-2222-4222-8222-222222222222")
+    code, output = cli(db, "orders", "add", "--account-id", str(unknown_id), *terms)
+    assert code == 1
+    assert "Order account must exist" in output
+    assert current(db) == before
+
+    code, _ = cli(db, "orders", "add", "--account-id", str(DEFAULT_MANUAL_ACCOUNT_ID), *terms)
+    assert code == 0
+    assert current(db).snapshot.orders[0].account_id == DEFAULT_MANUAL_ACCOUNT_ID
+
+
+def test_cli_nonmanual_order_keeps_account_and_fill_fails_closed(tmp_path):
+    db = tmp_path / "advisor.sqlite"
+    assert cli(db, *setup_args())[0] == 0
+    previous = current(db)
+    wallet_id = UUID("22222222-2222-4222-8222-222222222222")
+    wallet = Account(
+        wallet_id,
+        "Wallet",
+        AccountType.EXTERNAL_WALLET,
+        (AssetPosition("ETH", D("2")), AssetPosition("USDC", D("500"))),
+    )
+    multi_account = replace(
+        previous.snapshot,
+        id=uuid4(),
+        portfolio=Portfolio(previous.snapshot.portfolio.accounts + (wallet,)),
+    )
+    repository = SQLiteSnapshotRepository(Database(db))
+    asyncio.run(
+        ConfirmedStateService(repository).confirm(
+            multi_account,
+            expected_revision=previous.revision,
+            previous_snapshot_id=previous.snapshot.id,
+            update_type=UpdateType.BALANCE_CORRECTION,
+        )
+    )
+
+    assert (
+        cli(
+            db,
+            "orders",
+            "add",
+            "--account-id",
+            str(wallet_id),
+            "--asset",
+            "ETH",
+            "--side",
+            "sell",
+            "--price",
+            "110",
+            "--quantity",
+            "1",
+        )[0]
+        == 0
+    )
+    added = current(db)
+    tracked_order = added.snapshot.orders[0]
+    assert tracked_order.account_id == wallet_id
+
+    fill_code, fill_output = cli(
+        db,
+        "orders",
+        "update",
+        str(tracked_order.id),
+        "--status",
+        "filled",
+        "--position",
+        "ETH=1",
+    )
+    assert fill_code == 1
+    assert "account-aware replacement is not available" in fill_output
+    assert current(db) == added
+
+    assert cli(db, "orders", "update", str(tracked_order.id), "--status", "cancelled")[0] == 0
+    cancelled = current(db).snapshot.orders[0]
+    assert cancelled.account_id == wallet_id
+    assert cancelled.status is LimitOrderStatus.CANCELLED
+    assert current(db).snapshot.portfolio.accounts[1] == wallet
+
+
 def test_cli_replace_orders_and_filled_balances(tmp_path):
     db = tmp_path / "advisor.sqlite"
     cli(db, *setup_args())
@@ -301,6 +391,8 @@ def test_cli_replace_orders_and_filled_balances(tmp_path):
             db,
             "orders",
             "add",
+            "--account-id",
+            str(DEFAULT_MANUAL_ACCOUNT_ID),
             "--asset",
             "BTC",
             "--side",
@@ -315,6 +407,7 @@ def test_cli_replace_orders_and_filled_balances(tmp_path):
     added = current(db)
     o = added.snapshot.orders[0]
     assert added.revision == 2
+    assert o.account_id == DEFAULT_MANUAL_ACCOUNT_ID
     assert cli(db, "orders", "update", str(o.id), "--status", "filled")[0] == 1
     assert current(db) == added
     assert (
@@ -334,6 +427,7 @@ def test_cli_replace_orders_and_filled_balances(tmp_path):
     )
     filled = current(db)
     assert filled.snapshot.orders[0].status is LimitOrderStatus.FILLED
+    assert filled.snapshot.orders[0].account_id == o.account_id
     assert filled.snapshot.portfolio.positions[1].amount == D("9917")
     assert cli(db, "orders", "update", str(o.id), "--status", "cancelled")[0] == 1
     assert (
@@ -365,6 +459,56 @@ def test_cli_replace_orders_and_filled_balances(tmp_path):
     assert "filled" in cli(db, "orders", "show")[1]
 
 
+@pytest.mark.parametrize(
+    "side,price,quantity,error",
+    [
+        ("buy", "20000", "1", "Insufficient settlement balance"),
+        ("sell", "110", "11", "Insufficient asset balance"),
+    ],
+)
+def test_cli_filled_order_requires_resources_in_its_manual_account(
+    tmp_path, side, price, quantity, error
+):
+    db = tmp_path / "advisor.sqlite"
+    assert cli(db, *setup_args())[0] == 0
+    assert (
+        cli(
+            db,
+            "orders",
+            "add",
+            "--account-id",
+            str(DEFAULT_MANUAL_ACCOUNT_ID),
+            "--asset",
+            "BTC",
+            "--side",
+            side,
+            "--price",
+            price,
+            "--quantity",
+            quantity,
+        )[0]
+        == 0
+    )
+    before = current(db)
+
+    code, output = cli(
+        db,
+        "orders",
+        "update",
+        str(before.snapshot.orders[0].id),
+        "--status",
+        "filled",
+        "--position",
+        "BTC=10",
+        "--position",
+        "USDC=10000",
+    )
+
+    assert code == 1
+    assert error in output
+    assert current(db) == before
+
+
 def test_cli_full_balance_entry_cannot_flatten_other_accounts(tmp_path):
     db = tmp_path / "advisor.sqlite"
     assert cli(db, *setup_args())[0] == 0
@@ -373,6 +517,8 @@ def test_cli_full_balance_entry_cannot_flatten_other_accounts(tmp_path):
             db,
             "orders",
             "add",
+            "--account-id",
+            str(DEFAULT_MANUAL_ACCOUNT_ID),
             "--asset",
             "BTC",
             "--side",
@@ -432,13 +578,26 @@ def test_cli_order_resolution_does_not_infer_balances(tmp_path, status):
     db = tmp_path / "advisor.sqlite"
     cli(db, *setup_args())
     cli(
-        db, "orders", "add", "--asset", "BTC", "--side", "sell", "--price", "110", "--quantity", "1"
+        db,
+        "orders",
+        "add",
+        "--account-id",
+        str(DEFAULT_MANUAL_ACCOUNT_ID),
+        "--asset",
+        "BTC",
+        "--side",
+        "sell",
+        "--price",
+        "110",
+        "--quantity",
+        "1",
     )
     before = current(db)
     assert (
         cli(db, "orders", "update", str(before.snapshot.orders[0].id), "--status", status)[0] == 0
     )
     assert current(db).snapshot.portfolio == before.snapshot.portfolio
+    assert current(db).snapshot.orders[0].account_id == before.snapshot.orders[0].account_id
 
 
 def test_cli_revision_conflict_after_confirmation_prompt(tmp_path):

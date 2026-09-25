@@ -4,6 +4,7 @@ import os
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -12,7 +13,7 @@ from advanced_trading_advisor.analysis.result import AnalysisResultCodec
 from advanced_trading_advisor.analysis.use_case import AnalysisFailed
 from advanced_trading_advisor.configuration import local_environment
 from advanced_trading_advisor.delivery.models import DeliveryStatus
-from advanced_trading_advisor.domain.numeric import parse_decimal, parse_symbol
+from advanced_trading_advisor.domain.numeric import calculation_context, parse_decimal, parse_symbol
 from advanced_trading_advisor.domain.persistence import PersistenceError, UpdateType
 from advanced_trading_advisor.domain.validation import require
 from advanced_trading_advisor.market.live import SYMBOL_IDS
@@ -102,6 +103,9 @@ def parser():
     orders = commands.add_parser("orders").add_subparsers(dest="operation", required=True)
     orders.add_parser("show")
     add = orders.add_parser("add")
+    add.add_argument(
+        "--account-id", type=UUID, required=True, help="Existing portfolio account UUID."
+    )
     add.add_argument("--asset", required=True)
     add.add_argument("--side", choices=[s.value for s in TradingSide], required=True)
     add.add_argument("--price", required=True, help="USD per asset.")
@@ -570,6 +574,10 @@ class CLI:
         else:
             previous = current.snapshot
             if args.operation == "add":
+                require(
+                    any(account.id == args.account_id for account in previous.portfolio.accounts),
+                    "Order account must exist in the confirmed portfolio.",
+                )
                 asset = parse_symbol(args.asset)
                 require(asset in SYMBOL_IDS, "Unsupported asset.")
                 order = LimitOrder(
@@ -581,6 +589,7 @@ class CLI:
                     LimitOrderStatus.OPEN,
                     at,
                     at,
+                    account_id=args.account_id,
                 )
                 snapshot = replace(
                     previous, id=uuid4(), confirmed_at=at, orders=previous.orders + (order,)
@@ -595,6 +604,29 @@ class CLI:
                 status = LimitOrderStatus(args.status)
                 if status is LimitOrderStatus.FILLED:
                     require_manual_only_portfolio(previous.portfolio)
+                    require(
+                        old.account_id == DEFAULT_MANUAL_ACCOUNT_ID,
+                        "FILLED balance entry is available only for the default MANUAL account.",
+                    )
+                    account_holdings = {
+                        position.symbol: position.amount
+                        for position in previous.portfolio.accounts[0].positions
+                    }
+                    if old.side is TradingSide.SELL:
+                        require(
+                            account_holdings.get(old.asset, Decimal(0)) >= old.quantity_asset,
+                            "Insufficient asset balance in the order account for this SELL.",
+                        )
+                    else:
+                        with calculation_context():
+                            buy_commitment = old.target_price * old.quantity_asset
+                        require(
+                            any(
+                                account_holdings.get(stable, Decimal(0)) >= buy_commitment
+                                for stable in SETTLEMENT_ASSETS
+                            ),
+                            "Insufficient settlement balance in the order account for this BUY.",
+                        )
                     require(
                         args.position is not None or args.empty,
                         "FILLED requires full reconciled balances via --position or --empty; "

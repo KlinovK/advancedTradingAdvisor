@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import MAX_EMAX, MIN_EMIN, Decimal, Rounded, localcontext
 from enum import StrEnum
@@ -111,6 +111,7 @@ class LimitOrderStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class LimitOrder:
     id: UUID
+    account_id: UUID = field(kw_only=True)
     asset: str
     side: TradingSide
     target_price: Decimal
@@ -122,6 +123,7 @@ class LimitOrder:
 
     def __post_init__(self):
         identity(self.id)
+        identity(self.account_id)
         symbol(self.asset)
         require(isinstance(self.side, TradingSide), "Invalid trading side.")
         require(isinstance(self.status, LimitOrderStatus), "Invalid order status.")
@@ -188,6 +190,11 @@ class ConfirmedPortfolioSnapshot:
         )
         items(self.orders, LimitOrder)
         items(self.core_positions, CorePosition)
+        account_ids = {account.id for account in self.portfolio.accounts}
+        require(
+            all(order.account_id in account_ids for order in self.orders),
+            "Order account must exist in the confirmed portfolio.",
+        )
         require(
             len({c.symbol for c in self.core_positions}) == len(self.core_positions),
             "Core symbols must be unique.",

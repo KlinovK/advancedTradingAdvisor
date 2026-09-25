@@ -14,7 +14,10 @@ from advanced_trading_advisor.portfolio.models import (
     AssetPosition,
     ConfirmedPortfolioSnapshot,
     FinancialSettings,
+    LimitOrder,
+    LimitOrderStatus,
     Portfolio,
+    TradingSide,
 )
 from advanced_trading_advisor.storage.codecs import (
     PAYLOAD_VERSION,
@@ -32,12 +35,15 @@ BINANCE_ID = UUID("cb3824be-f078-48a5-8fdf-3e49ba25b6f4")
 WALLET_ID = UUID("e548c922-272f-469f-bb89-35c8e7cc6de5")
 
 
-def snapshot(accounts: tuple[Account, ...]) -> ConfirmedPortfolioSnapshot:
+def snapshot(
+    accounts: tuple[Account, ...], orders: tuple[LimitOrder, ...] = ()
+) -> ConfirmedPortfolioSnapshot:
     return ConfirmedPortfolioSnapshot(
         SNAPSHOT_ID,
         NOW,
         Portfolio(accounts),
         FinancialSettings(Decimal("250.00"), Decimal("12.0")),
+        orders,
     )
 
 
@@ -48,6 +54,63 @@ def account(
     positions: tuple[AssetPosition, ...] = (AssetPosition("ETH", Decimal("0.8")),),
 ) -> Account:
     return Account(account_id, name, account_type, positions)
+
+
+def order(order_id: UUID, account_id: UUID, *, side: TradingSide = TradingSide.BUY) -> LimitOrder:
+    return LimitOrder(
+        order_id,
+        "ETH",
+        side,
+        Decimal("1234.000000000000000001"),
+        Decimal("0.01000000000000000001"),
+        LimitOrderStatus.OPEN,
+        NOW,
+        NOW,
+        account_id=account_id,
+    )
+
+
+def test_orders_round_trip_distinct_account_provenance_and_exact_decimals() -> None:
+    binance_order = order(UUID("50c7b796-f122-4bd7-a8d7-762cbddf7cff"), BINANCE_ID)
+    wallet_order = order(
+        UUID("72309408-39ba-4515-ac35-81d5f6f4126b"), WALLET_ID, side=TradingSide.SELL
+    )
+    original = snapshot((account(), account(WALLET_ID, "Wallet")), (binance_order, wallet_order))
+
+    encoded = SnapshotCodec.encode(original)
+    decoded = SnapshotCodec.decode(encoded)
+    payload = json.loads(encoded)
+
+    assert decoded == original
+    assert [entry.account_id for entry in decoded.orders] == [BINANCE_ID, WALLET_ID]
+    assert [entry["account_id"] for entry in payload["data"]["orders"]] == [
+        str(BINANCE_ID),
+        str(WALLET_ID),
+    ]
+    assert decoded.orders[0].target_price.as_tuple() == binance_order.target_price.as_tuple()
+    assert decoded.orders[1].quantity_asset.as_tuple() == wallet_order.quantity_asset.as_tuple()
+    assert SnapshotCodec.encode(decoded) == encoded
+
+
+@pytest.mark.parametrize("change", ["missing", "invalid", "orphan", "old_v3"])
+def test_order_account_payload_must_be_explicit_valid_and_resolvable(change: str) -> None:
+    original = snapshot(
+        (account(),), (order(UUID("50c7b796-f122-4bd7-a8d7-762cbddf7cff"), BINANCE_ID),)
+    )
+    payload = json.loads(SnapshotCodec.encode(original))
+    encoded_order = payload["data"]["orders"][0]
+    if change == "missing":
+        del encoded_order["account_id"]
+    elif change == "invalid":
+        encoded_order["account_id"] = "not-a-uuid"
+    elif change == "orphan":
+        encoded_order["account_id"] = str(WALLET_ID)
+    else:
+        payload["schema_version"] = 3
+        del encoded_order["account_id"]
+
+    with pytest.raises(PayloadError, match="Malformed or unsupported versioned payload"):
+        SnapshotCodec.decode(json.dumps(payload))
 
 
 def test_one_account_round_trip_preserves_identity_name_type_and_decimal() -> None:
@@ -216,7 +279,11 @@ def test_sqlite_repository_round_trips_account_provenance_in_disposable_database
                 AccountType.EXTERNAL_WALLET,
                 (AssetPosition("ETH", Decimal("2.7")),),
             ),
-        )
+        ),
+        (
+            order(UUID("50c7b796-f122-4bd7-a8d7-762cbddf7cff"), BINANCE_ID),
+            order(UUID("72309408-39ba-4515-ac35-81d5f6f4126b"), WALLET_ID),
+        ),
     )
 
     async def scenario() -> None:
@@ -232,7 +299,9 @@ def test_sqlite_repository_round_trips_account_provenance_in_disposable_database
 
 
 def test_postgres_save_uses_shared_codec_without_connecting_to_postgres() -> None:
-    original = snapshot((account(),))
+    original = snapshot(
+        (account(),), (order(UUID("50c7b796-f122-4bd7-a8d7-762cbddf7cff"), BINANCE_ID),)
+    )
 
     class FakeConnection:
         payload: str | None = None
