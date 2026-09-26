@@ -329,6 +329,8 @@ def test_only_existing_reads_and_account_mutations_are_exposed() -> None:
         ("/v1/portfolio/accounts/{account_id}", {"PATCH"}),
         ("/v1/portfolio/accounts/{account_id}/holdings", {"PUT"}),
         ("/v1/portfolio/accounts/{account_id}", {"DELETE"}),
+        ("/v1/portfolio/financial-settings", {"PUT"}),
+        ("/v1/portfolio/core-positions/{symbol}", {"PUT"}),
         ("/v1/analyses/latest", {"GET"}),
         ("/v1/analyses", {"GET"}),
         ("/v1/analyses/{run_id}", {"GET"}),

@@ -25,6 +25,14 @@ from advanced_trading_advisor.portfolio.update_account_holdings import (
     UpdateAccountHoldings,
     UpdateAccountHoldingsCommand,
 )
+from advanced_trading_advisor.portfolio.update_core_position import (
+    UpdateCorePosition,
+    UpdateCorePositionCommand,
+)
+from advanced_trading_advisor.portfolio.update_financial_settings import (
+    UpdateFinancialSettings,
+    UpdateFinancialSettingsCommand,
+)
 from advanced_trading_advisor.storage.factory import create_storage
 from advanced_trading_advisor.storage.settings import StorageBackend, StorageSettings
 
@@ -38,6 +46,7 @@ from .account_dtos import (
 from .analysis_dtos import AnalysisDetailDTO, RecentAnalysesDTO
 from .auth import APITokenSettings, UnauthorizedError, bearer_authentication
 from .dtos import CurrentPortfolioDTO
+from .policy_dtos import UpdateCorePositionInputDTO, UpdateFinancialSettingsInputDTO
 
 
 def error_response(
@@ -89,6 +98,8 @@ def create_app(
     rename_account: RenameAccount | None = None,
     update_account_holdings: UpdateAccountHoldings | None = None,
     remove_account: RemoveAccount | None = None,
+    update_financial_settings: UpdateFinancialSettings | None = None,
+    update_core_position: UpdateCorePosition | None = None,
 ) -> FastAPI:
     """Compose without connecting, initializing, or migrating storage.
 
@@ -119,6 +130,14 @@ def create_app(
         else UpdateAccountHoldings(snapshots)
     )
     account_remover = remove_account if remove_account is not None else RemoveAccount(snapshots)
+    settings_updater = (
+        update_financial_settings
+        if update_financial_settings is not None
+        else UpdateFinancialSettings(snapshots)
+    )
+    core_updater = (
+        update_core_position if update_core_position is not None else UpdateCorePosition(snapshots)
+    )
     history = AnalysisHistoryQuery(analyses) if analyses is not None else None
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     authenticate = bearer_authentication(token_settings)
@@ -197,6 +216,37 @@ def create_app(
         try:
             current = await account_remover.execute(
                 RemoveAccountCommand(body.expected_revision, account_id)
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.put("/v1/portfolio/financial-settings", dependencies=[Depends(authenticate)])
+    async def replace_financial_settings(body: UpdateFinancialSettingsInputDTO) -> JSONResponse:
+        try:
+            current = await settings_updater.execute(
+                UpdateFinancialSettingsCommand(
+                    body.expected_revision,
+                    parse_decimal(body.monthly_expenses_usd, positive=True),
+                    parse_decimal(body.target_expense_runway_months, positive=True),
+                )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.put("/v1/portfolio/core-positions/{symbol}", dependencies=[Depends(authenticate)])
+    async def upsert_core_position(symbol: str, body: UpdateCorePositionInputDTO) -> JSONResponse:
+        try:
+            current = await core_updater.execute(
+                UpdateCorePositionCommand(
+                    body.expected_revision,
+                    symbol,
+                    parse_decimal(body.hard_floor, positive=True),
+                    parse_decimal(body.preferred_quantity, positive=True),
+                )
             )
             payload = asdict(CurrentPortfolioDTO.from_domain(current))
         except Exception as error:
