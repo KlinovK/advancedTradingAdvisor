@@ -321,7 +321,7 @@ def test_production_composition_requires_postgres_without_connecting(monkeypatch
     assert len(calls) == 1
 
 
-def test_only_implemented_routes_are_exposed_without_generic_status_or_fill_mutation() -> None:
+def test_only_implemented_routes_are_exposed_with_dedicated_fill_not_generic_status() -> None:
     app = app_with(FakeSnapshots(None))
     assert [(route.path, route.methods) for route in app.routes] == [
         ("/v1/portfolio", {"GET"}),
@@ -334,6 +334,7 @@ def test_only_implemented_routes_are_exposed_without_generic_status_or_fill_muta
         ("/v1/portfolio/orders", {"POST"}),
         ("/v1/portfolio/orders/{order_id}/cancel", {"POST"}),
         ("/v1/portfolio/orders/{order_id}/expire", {"POST"}),
+        ("/v1/portfolio/orders/{order_id}/confirm-filled", {"POST"}),
         ("/v1/analyses/latest", {"GET"}),
         ("/v1/analyses", {"GET"}),
         ("/v1/analyses/{run_id}", {"GET"}),

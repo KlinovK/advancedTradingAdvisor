@@ -16,6 +16,10 @@ from advanced_trading_advisor.domain.numeric import parse_decimal
 from advanced_trading_advisor.domain.persistence import RevisionConflictError, StateConflictError
 from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
 from advanced_trading_advisor.portfolio.add_limit_order import AddLimitOrder, AddLimitOrderCommand
+from advanced_trading_advisor.portfolio.confirm_limit_order_filled import (
+    ConfirmLimitOrderFilled,
+    ConfirmLimitOrderFilledCommand,
+)
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.create_account import CreateAccount, CreateAccountCommand
 from advanced_trading_advisor.portfolio.models import AssetPosition, LimitOrderStatus
@@ -51,7 +55,11 @@ from .account_dtos import (
 from .analysis_dtos import AnalysisDetailDTO, RecentAnalysesDTO
 from .auth import APITokenSettings, UnauthorizedError, bearer_authentication
 from .dtos import CurrentPortfolioDTO
-from .order_dtos import AddLimitOrderInputDTO, OrderLifecycleInputDTO
+from .order_dtos import (
+    AddLimitOrderInputDTO,
+    ConfirmLimitOrderFilledInputDTO,
+    OrderLifecycleInputDTO,
+)
 from .policy_dtos import UpdateCorePositionInputDTO, UpdateFinancialSettingsInputDTO
 
 
@@ -108,6 +116,7 @@ def create_app(
     update_core_position: UpdateCorePosition | None = None,
     add_limit_order: AddLimitOrder | None = None,
     update_limit_order_status: UpdateLimitOrderStatus | None = None,
+    confirm_limit_order_filled: ConfirmLimitOrderFilled | None = None,
 ) -> FastAPI:
     """Compose without connecting, initializing, or migrating storage.
 
@@ -151,6 +160,11 @@ def create_app(
         update_limit_order_status
         if update_limit_order_status is not None
         else UpdateLimitOrderStatus(snapshots)
+    )
+    order_fill_confirmer = (
+        confirm_limit_order_filled
+        if confirm_limit_order_filled is not None
+        else ConfirmLimitOrderFilled(snapshots)
     )
     history = AnalysisHistoryQuery(analyses) if analyses is not None else None
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -304,6 +318,26 @@ def create_app(
             current = await order_status_updater.execute(
                 UpdateLimitOrderStatusCommand(
                     body.expected_revision, order_id, LimitOrderStatus.EXPIRED
+                )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.post(
+        "/v1/portfolio/orders/{order_id}/confirm-filled", dependencies=[Depends(authenticate)]
+    )
+    async def confirm_portfolio_order_filled(
+        order_id: UUID, body: ConfirmLimitOrderFilledInputDTO
+    ) -> JSONResponse:
+        try:
+            current = await order_fill_confirmer.execute(
+                ConfirmLimitOrderFilledCommand(
+                    expected_revision=body.expected_revision,
+                    order_id=order_id,
+                    settlement_asset=body.settlement_asset,
+                    positions=positions_from_input(body.positions),
                 )
             )
             payload = asdict(CurrentPortfolioDTO.from_domain(current))

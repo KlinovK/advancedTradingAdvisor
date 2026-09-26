@@ -12,7 +12,7 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private HTTP portfolio and analysis API (Steps 8B–8F.1)
+## Private HTTP portfolio and analysis API (Steps 8B–8F.2)
 
 The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
 `GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
@@ -58,8 +58,18 @@ OPEN status, and timestamps; no default account is inferred. Authenticated
 `POST /v1/portfolio/orders/{order_id}/expire` take only `expected_revision` and apply fixed
 CANCELLED/EXPIRED transitions without changing holdings. Successful responses contain the complete
 updated portfolio (`201` for creation, `200` for transitions). A `409 revision_conflict` requires
-reload/review, not automatic retry. FILLED and client-selected status are intentionally not exposed;
+reload/review, not automatic retry. These three routes cannot set FILLED or client-selected status;
 these operations do not execute or cancel anything on an exchange.
+
+Bearer-authenticated `POST /v1/portfolio/orders/{order_id}/confirm-filled` records a manually
+executed fill. Its body contains only `expected_revision`, explicit `settlement_asset` (`USDT` or
+`USDC`), and `positions` with canonical symbols and decimal-string amounts. Positions are the
+COMPLETE post-fill holdings of the account resolved from `order.account_id`, not deltas: omitted
+holdings are not merged back in. Clients cannot choose an account or status. Success atomically
+marks the order FILLED and reconciles only that account, returning the complete updated portfolio
+(`200`). Global core floors remain enforced. Target price is not actual execution price; fees,
+slippage, and proceeds are not inferred. A revision conflict requires reload/review, never automatic
+retry. This records external execution only; no trades are executed automatically.
 
 Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
 `ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private
