@@ -3,8 +3,10 @@
 import hmac
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Annotated
 
-from fastapi import Request
+from fastapi import Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,8 +31,13 @@ class UnauthorizedError(Exception):
 
 def bearer_authentication(settings: APITokenSettings):
     expected = settings.token.encode("utf-8")
+    # Native OpenAPI metadata only: the strict validator below still decides authorization.
+    bearer = HTTPBearer(auto_error=False, scheme_name="BearerAuth")
 
-    async def authenticate(request: Request) -> None:
+    async def authenticate(
+        request: Request,
+        _credential: Annotated[HTTPAuthorizationCredentials | None, Security(bearer)],
+    ) -> None:
         authorization_headers = request.headers.getlist("authorization")
         if len(authorization_headers) != 1:
             raise UnauthorizedError

@@ -544,25 +544,31 @@ def test_completed_run_without_stored_result_has_metadata_but_no_invented_result
     assert repository.calls == [("get", RUN_ID)]
 
 
-def test_older_decoded_result_without_active_analysis_maps_explicit_null() -> None:
+@pytest.mark.parametrize("path", ["/v1/analyses/latest", f"/v1/analyses/{RUN_ID}"])
+def test_real_v3_encoder_is_readable_through_history_and_http(path) -> None:
     original = completed_result()
     financial = replace(
         original.financial,
         strategy_dry_powder_usd=Decimal("0"),
         recommended_deployment_usd=Decimal("0"),
     )
-    legacy = replace(original, active=None, financial=financial)
-    historical_payload = json.loads(AnalysisResultCodec.encode(legacy))
-    # Actual v3 payloads predate the setup_id recommendation field.
-    for recommendation in historical_payload["data"]["recommendations"]:
-        recommendation.pop("setup_id")
-    stored = replace(records()[-1], result_json=json.dumps(historical_payload))
+    legacy = replace(
+        original,
+        active=None,
+        financial=financial,
+        recommendations=tuple(replace(r, setup_id=None) for r in original.recommendations),
+    )
+    encoded = AnalysisResultCodec.encode(legacy)
+    assert json.loads(encoded)["schema_version"] == 3
+    stored = replace(records()[-1], result_json=encoded)
 
-    response = get(app_with(FakeAnalyses((stored,))), f"/v1/analyses/{RUN_ID}")
+    response = get(app_with(FakeAnalyses((stored,))), path)
 
     assert response.status_code == 200
     assert response.json()["result"]["active"] is None
     assert response.json()["result"]["snapshot_id"] == str(HISTORICAL_SNAPSHOT_ID)
+    assert "result_json" not in response.text
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_unknown_run_id_returns_sanitized_404() -> None:

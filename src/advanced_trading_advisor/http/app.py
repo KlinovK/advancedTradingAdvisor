@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
 from advanced_trading_advisor.analysis.history_query import AnalysisHistoryQuery
 from advanced_trading_advisor.analysis.repositories import AnalysisRunRepository
@@ -61,6 +62,7 @@ from .order_dtos import (
     OrderLifecycleInputDTO,
 )
 from .policy_dtos import UpdateCorePositionInputDTO, UpdateFinancialSettingsInputDTO
+from .schema import WRITE_ERRORS, error_schemas
 
 
 def error_response(
@@ -167,7 +169,7 @@ def create_app(
         else ConfirmLimitOrderFilled(snapshots)
     )
     history = AnalysisHistoryQuery(analyses) if analyses is not None else None
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
     authenticate = bearer_authentication(token_settings)
 
     @app.exception_handler(UnauthorizedError)
@@ -180,7 +182,34 @@ def create_app(
     async def invalid_request(_request: Request, _error: RequestValidationError) -> JSONResponse:
         return error_response(422, "invalid_request", "Invalid request parameters.")
 
-    @app.get("/v1/portfolio", dependencies=[Depends(authenticate)])
+    @app.exception_handler(HTTPException)
+    async def framework_error(_request: Request, error: HTTPException) -> JSONResponse:
+        code, message = {
+            400: ("invalid_request", "Invalid request body."),
+            401: ("unauthorized", "Authentication required."),
+            404: ("not_found", "Route not found."),
+            405: ("method_not_allowed", "Method not allowed."),
+            422: ("invalid_request", "Invalid request parameters."),
+            500: ("internal_error", "Request could not be completed."),
+        }.get(error.status_code, ("http_error", "HTTP request failed."))
+        response = error_response(error.status_code, code, message)
+        # Preserve routing's required Allow header, never arbitrary exception headers/details.
+        if error.status_code == 405 and error.headers and "Allow" in error.headers:
+            response.headers["Allow"] = error.headers["Allow"]
+        if error.status_code == 401:
+            response.headers["WWW-Authenticate"] = "Bearer"
+        return response
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(_request: Request, _error: Exception) -> JSONResponse:
+        return error_response(500, "internal_error", "Request could not be completed.")
+
+    @app.get(
+        "/v1/portfolio",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=error_schemas(401, 404, 500),
+    )
     async def get_portfolio() -> JSONResponse:
         try:
             current = await state.load_current()
@@ -193,7 +222,13 @@ def create_app(
             return error_response(500, "internal_error", "Portfolio could not be loaded.")
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.post("/v1/portfolio/accounts", dependencies=[Depends(authenticate)], status_code=201)
+    @app.post(
+        "/v1/portfolio/accounts",
+        dependencies=[Depends(authenticate)],
+        status_code=201,
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def create_portfolio_account(body: CreateAccountInputDTO) -> JSONResponse:
         try:
             command = CreateAccountCommand(
@@ -209,7 +244,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, status_code=201, headers={"Cache-Control": "no-store"})
 
-    @app.patch("/v1/portfolio/accounts/{account_id}", dependencies=[Depends(authenticate)])
+    @app.patch(
+        "/v1/portfolio/accounts/{account_id}",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def rename_portfolio_account(
         account_id: UUID, body: RenameAccountInputDTO
     ) -> JSONResponse:
@@ -222,7 +262,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.put("/v1/portfolio/accounts/{account_id}/holdings", dependencies=[Depends(authenticate)])
+    @app.put(
+        "/v1/portfolio/accounts/{account_id}/holdings",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def replace_account_holdings(
         account_id: UUID, body: UpdateAccountHoldingsInputDTO
     ) -> JSONResponse:
@@ -237,7 +282,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.delete("/v1/portfolio/accounts/{account_id}", dependencies=[Depends(authenticate)])
+    @app.delete(
+        "/v1/portfolio/accounts/{account_id}",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def delete_portfolio_account(
         account_id: UUID, body: DeleteAccountInputDTO
     ) -> JSONResponse:
@@ -250,7 +300,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.put("/v1/portfolio/financial-settings", dependencies=[Depends(authenticate)])
+    @app.put(
+        "/v1/portfolio/financial-settings",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def replace_financial_settings(body: UpdateFinancialSettingsInputDTO) -> JSONResponse:
         try:
             current = await settings_updater.execute(
@@ -265,7 +320,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.put("/v1/portfolio/core-positions/{symbol}", dependencies=[Depends(authenticate)])
+    @app.put(
+        "/v1/portfolio/core-positions/{symbol}",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def upsert_core_position(symbol: str, body: UpdateCorePositionInputDTO) -> JSONResponse:
         try:
             current = await core_updater.execute(
@@ -281,7 +341,13 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.post("/v1/portfolio/orders", dependencies=[Depends(authenticate)], status_code=201)
+    @app.post(
+        "/v1/portfolio/orders",
+        dependencies=[Depends(authenticate)],
+        status_code=201,
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def add_portfolio_order(body: AddLimitOrderInputDTO) -> JSONResponse:
         try:
             current = await order_adder.execute(
@@ -299,7 +365,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, status_code=201, headers={"Cache-Control": "no-store"})
 
-    @app.post("/v1/portfolio/orders/{order_id}/cancel", dependencies=[Depends(authenticate)])
+    @app.post(
+        "/v1/portfolio/orders/{order_id}/cancel",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def cancel_portfolio_order(order_id: UUID, body: OrderLifecycleInputDTO) -> JSONResponse:
         try:
             current = await order_status_updater.execute(
@@ -312,7 +383,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.post("/v1/portfolio/orders/{order_id}/expire", dependencies=[Depends(authenticate)])
+    @app.post(
+        "/v1/portfolio/orders/{order_id}/expire",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
+    )
     async def expire_portfolio_order(order_id: UUID, body: OrderLifecycleInputDTO) -> JSONResponse:
         try:
             current = await order_status_updater.execute(
@@ -326,7 +402,10 @@ def create_app(
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @app.post(
-        "/v1/portfolio/orders/{order_id}/confirm-filled", dependencies=[Depends(authenticate)]
+        "/v1/portfolio/orders/{order_id}/confirm-filled",
+        dependencies=[Depends(authenticate)],
+        response_model=CurrentPortfolioDTO,
+        responses=WRITE_ERRORS,
     )
     async def confirm_portfolio_order_filled(
         order_id: UUID, body: ConfirmLimitOrderFilledInputDTO
@@ -345,7 +424,12 @@ def create_app(
             return write_error_response(error)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.get("/v1/analyses/latest", dependencies=[Depends(authenticate)])
+    @app.get(
+        "/v1/analyses/latest",
+        dependencies=[Depends(authenticate)],
+        response_model=AnalysisDetailDTO,
+        responses=error_schemas(401, 404, 500),
+    )
     async def latest_analysis() -> JSONResponse:
         try:
             if history is None:
@@ -358,7 +442,12 @@ def create_app(
             return error_response(500, "internal_error", "Analysis could not be loaded.")
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.get("/v1/analyses", dependencies=[Depends(authenticate)])
+    @app.get(
+        "/v1/analyses",
+        dependencies=[Depends(authenticate)],
+        response_model=RecentAnalysesDTO,
+        responses=error_schemas(401, 422, 500),
+    )
     async def recent_analyses(limit: int = Query(..., gt=0)) -> JSONResponse:
         try:
             if history is None:
@@ -368,7 +457,12 @@ def create_app(
             return error_response(500, "internal_error", "Analysis could not be loaded.")
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
-    @app.get("/v1/analyses/{run_id}", dependencies=[Depends(authenticate)])
+    @app.get(
+        "/v1/analyses/{run_id}",
+        dependencies=[Depends(authenticate)],
+        response_model=AnalysisDetailDTO,
+        responses=error_schemas(401, 404, 422, 500),
+    )
     async def analysis_detail(run_id: UUID) -> JSONResponse:
         if run_id.int == 0:
             return error_response(422, "invalid_request", "Invalid request parameters.")

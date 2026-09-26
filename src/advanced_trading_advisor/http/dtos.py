@@ -3,9 +3,17 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Annotated
 
 from advanced_trading_advisor.domain.persistence import CurrentPortfolio
-from advanced_trading_advisor.portfolio.models import AssetPosition
+from advanced_trading_advisor.portfolio.models import (
+    AccountType,
+    AssetPosition,
+    LimitOrderStatus,
+    TradingSide,
+)
+
+from .schema import DecimalText, UTCText, UUIDText, enum_text
 
 
 def decimal_text(value: Decimal) -> str:
@@ -19,7 +27,7 @@ def utc_timestamp(value: datetime) -> str:
 @dataclass(frozen=True, slots=True)
 class PositionDTO:
     symbol: str
-    amount: str
+    amount: DecimalText
 
     @classmethod
     def from_domain(cls, position: AssetPosition) -> "PositionDTO":
@@ -28,45 +36,45 @@ class PositionDTO:
 
 @dataclass(frozen=True, slots=True)
 class AccountDTO:
-    id: str
+    id: UUIDText
     name: str
-    type: str
+    type: Annotated[str, enum_text(AccountType)]
     positions: tuple[PositionDTO, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class FinancialSettingsDTO:
-    monthly_expenses_usd: str
-    target_expense_runway_months: str
+    monthly_expenses_usd: DecimalText
+    target_expense_runway_months: DecimalText
 
 
 @dataclass(frozen=True, slots=True)
 class CorePositionDTO:
     symbol: str
-    hard_floor: str
-    preferred_quantity: str
+    hard_floor: DecimalText
+    preferred_quantity: DecimalText
     policy_version: int
 
 
 @dataclass(frozen=True, slots=True)
 class LimitOrderDTO:
-    id: str
-    account_id: str
+    id: UUIDText
+    account_id: UUIDText
     asset: str
-    side: str
-    target_price: str
-    quantity_asset: str
-    status: str
-    created_at: str
-    updated_at: str
-    resolved_at: str | None
+    side: Annotated[str, enum_text(TradingSide)]
+    target_price: DecimalText
+    quantity_asset: DecimalText
+    status: Annotated[str, enum_text(LimitOrderStatus)]
+    created_at: UTCText
+    updated_at: UTCText
+    resolved_at: UTCText | None
 
 
 @dataclass(frozen=True, slots=True)
 class CurrentPortfolioDTO:
     revision: int
-    snapshot_id: str
-    confirmed_at: str
+    snapshot_id: UUIDText
+    confirmed_at: UTCText
     accounts: tuple[AccountDTO, ...]
     aggregate_positions: tuple[PositionDTO, ...]
     financial_settings: FinancialSettingsDTO

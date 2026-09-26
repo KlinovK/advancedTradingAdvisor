@@ -12,7 +12,7 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private HTTP portfolio and analysis API (Steps 8B–8F.2)
+## Private HTTP portfolio and analysis API (HTTP V1, Step 8G.1)
 
 The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
 `GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
@@ -21,6 +21,17 @@ portfolio state, or starts analysis or scheduling. Account holdings are authorit
 `aggregate_positions` is derived for display. All financial decimals are JSON strings.
 Analysis routes use `AnalysisHistoryQuery` and preserve each run's historical snapshot ID;
 completed details include the decoded analysis and active setups. All four routes are read-only.
+
+V1 uses static bearer authentication on every product route. Responses use canonical UUID
+strings, UTC RFC3339 timestamps with six fractional digits and `Z`, and exact financial decimal
+strings (never JSON numbers). Errors use `{"error":{"code":"...","message":"..."}}`;
+`409 revision_conflict` additionally includes `reload_required: true`: reload/review, never
+automatically replay a mutation. Private responses and normalized errors use `Cache-Control: no-store`.
+Unparseable bodies return `400 invalid_request`; JSON syntax and request validation errors remain
+`422 invalid_request`. Unknown routes return `404 not_found`, unsupported methods return
+`405 method_not_allowed`. Paths are exact: trailing slashes return 404, not redirects.
+Public `/docs`, `/redoc`, and `/openapi.json` remain disabled. The complete schema, including
+bearer security and success/error DTOs, is available in-process through `app.openapi()`.
 
 `POST /v1/portfolio/accounts` is the first authenticated mutation. Its JSON body contains
 `expected_revision`, `name`, `account_type` (`binance`, `external_wallet`, `other_exchange`, or

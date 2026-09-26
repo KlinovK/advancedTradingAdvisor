@@ -3,28 +3,45 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Annotated
 
 from advanced_trading_advisor.analysis.active import (
     ActiveAnalysis,
     AssetDecision,
+    AssetDecisionType,
     SetupLevel,
+    SetupType,
+    TelegramSeverity,
     TradeSetup,
 )
 from advanced_trading_advisor.analysis.history_query import AnalysisRunDetail
-from advanced_trading_advisor.analysis.models import AnalysisRun
-from advanced_trading_advisor.analysis.recommendations import Recommendation
+from advanced_trading_advisor.analysis.models import AnalysisRun, AnalysisRunStatus
+from advanced_trading_advisor.analysis.reasoning import ReasoningMode
+from advanced_trading_advisor.analysis.recommendations import ActionType, Recommendation
 from advanced_trading_advisor.analysis.result import AnalysisResult, FinancialSummary
 from advanced_trading_advisor.analysis.traceability import DecisionConfiguration
-from advanced_trading_advisor.analysis.triggers import TriggerContext, TriggerTransition
+from advanced_trading_advisor.analysis.triggers import (
+    SetupStatus,
+    TriggerContext,
+    TriggerReason,
+    TriggerTimeframe,
+    TriggerTransition,
+)
+from advanced_trading_advisor.domain.persistence import FailureCategory
 from advanced_trading_advisor.market.models import (
     Candle,
     DailyContext,
+    DailyTrend,
+    DataCompleteness,
     MarketAssetData,
     MarketSnapshot,
     TechnicalFeatures,
 )
+from advanced_trading_advisor.market.regime import MarketRegime
+from advanced_trading_advisor.portfolio.models import TradingSide
 
 from .dtos import decimal_text, utc_timestamp
+from .schema import DecimalText, UTCText, UUIDText, enum_text
 
 
 def optional_decimal(value: Decimal | None) -> str | None:
@@ -37,12 +54,12 @@ def optional_timestamp(value: datetime | None) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisRunDTO:
-    run_id: str
-    snapshot_id: str
-    started_at: str
-    status: str
-    completed_at: str | None
-    market_cutoff: str | None
+    run_id: UUIDText
+    snapshot_id: UUIDText
+    started_at: UTCText
+    status: Annotated[str, enum_text(AnalysisRunStatus)]
+    completed_at: UTCText | None
+    market_cutoff: UTCText | None
 
     @classmethod
     def from_domain(cls, run: AnalysisRun) -> "AnalysisRunDTO":
@@ -67,11 +84,11 @@ class RecentAnalysesDTO:
 
 @dataclass(frozen=True, slots=True)
 class CandleDTO:
-    closed_at: str
-    open: str
-    high: str
-    low: str
-    close: str
+    closed_at: UTCText
+    open: DecimalText
+    high: DecimalText
+    low: DecimalText
+    close: DecimalText
 
     @classmethod
     def from_domain(cls, candle: Candle) -> "CandleDTO":
@@ -86,14 +103,14 @@ class CandleDTO:
 
 @dataclass(frozen=True, slots=True)
 class TechnicalFeaturesDTO:
-    change_24h_pct: str | None
-    change_7d_pct: str | None
-    rsi_4h: str | None
-    ema20_4h: str | None
-    ema50_4h: str | None
-    atr_4h: str | None
-    support: str | None
-    resistance: str | None
+    change_24h_pct: DecimalText | None
+    change_7d_pct: DecimalText | None
+    rsi_4h: DecimalText | None
+    ema20_4h: DecimalText | None
+    ema50_4h: DecimalText | None
+    atr_4h: DecimalText | None
+    support: DecimalText | None
+    resistance: DecimalText | None
 
     @classmethod
     def from_domain(cls, features: TechnicalFeatures) -> "TechnicalFeaturesDTO":
@@ -111,13 +128,13 @@ class TechnicalFeaturesDTO:
 
 @dataclass(frozen=True, slots=True)
 class DailyContextDTO:
-    latest_closed_at: str | None
-    closed_price_usd: str | None
-    ema20: str | None
-    ema50: str | None
-    support: str | None
-    resistance: str | None
-    trend: str
+    latest_closed_at: UTCText | None
+    closed_price_usd: DecimalText | None
+    ema20: DecimalText | None
+    ema50: DecimalText | None
+    support: DecimalText | None
+    resistance: DecimalText | None
+    trend: Annotated[str, enum_text(DailyTrend)]
 
     @classmethod
     def from_domain(cls, daily: DailyContext) -> "DailyContextDTO":
@@ -135,12 +152,12 @@ class DailyContextDTO:
 @dataclass(frozen=True, slots=True)
 class MarketAssetDTO:
     symbol: str
-    price_usd: str
-    quoted_at: str
-    latest_closed_candle_at: str | None
+    price_usd: DecimalText
+    quoted_at: UTCText
+    latest_closed_candle_at: UTCText | None
     technical_features: TechnicalFeaturesDTO
-    completeness: str
-    latest_closed_price_usd: str | None
+    completeness: Annotated[str, enum_text(DataCompleteness)]
+    latest_closed_price_usd: DecimalText | None
     daily_context: DailyContextDTO
     closed_1h_candles: tuple[CandleDTO, ...]
 
@@ -161,7 +178,7 @@ class MarketAssetDTO:
 
 @dataclass(frozen=True, slots=True)
 class MarketSnapshotDTO:
-    as_of: str
+    as_of: UTCText
     assets: tuple[MarketAssetDTO, ...]
     is_live: bool
 
@@ -176,21 +193,21 @@ class MarketSnapshotDTO:
 
 @dataclass(frozen=True, slots=True)
 class FinancialSummaryDTO:
-    total_portfolio_usd: str
-    current_stables_usd: str
-    stable_allocation_percent: str
-    monthly_expenses_usd: str
-    target_expense_runway_months: str
-    recommended_minimum_stables_usd: str
-    deployable_stables_usd: str
-    stable_reserve_deficit_usd: str
-    actual_expense_runway_months: str
-    open_buy_commitments_usd: str
-    hard_expense_reserve_usd: str
-    market_buffer_usd: str
-    potential_trading_liquidity_usd: str
-    strategy_dry_powder_usd: str
-    recommended_deployment_usd: str
+    total_portfolio_usd: DecimalText
+    current_stables_usd: DecimalText
+    stable_allocation_percent: DecimalText
+    monthly_expenses_usd: DecimalText
+    target_expense_runway_months: DecimalText
+    recommended_minimum_stables_usd: DecimalText
+    deployable_stables_usd: DecimalText
+    stable_reserve_deficit_usd: DecimalText
+    actual_expense_runway_months: DecimalText
+    open_buy_commitments_usd: DecimalText
+    hard_expense_reserve_usd: DecimalText
+    market_buffer_usd: DecimalText
+    potential_trading_liquidity_usd: DecimalText
+    strategy_dry_powder_usd: DecimalText
+    recommended_deployment_usd: DecimalText
 
     @classmethod
     def from_domain(cls, financial: FinancialSummary) -> "FinancialSummaryDTO":
@@ -215,19 +232,19 @@ class FinancialSummaryDTO:
 
 @dataclass(frozen=True, slots=True)
 class RecommendationDTO:
-    recommendation_id: str
+    recommendation_id: UUIDText
     asset: str | None
-    action_type: str
+    action_type: Annotated[str, enum_text(ActionType)]
     priority: int
     reason: str
-    existing_order_id: str | None
-    side: str | None
-    target_price: str | None
-    quantity_asset: str | None
+    existing_order_id: UUIDText | None
+    side: Annotated[str, enum_text(TradingSide)] | None
+    target_price: DecimalText | None
+    quantity_asset: DecimalText | None
     invalidation_condition: str | None
-    review_at: str | None
-    expires_at: str | None
-    setup_id: str | None
+    review_at: UTCText | None
+    expires_at: UTCText | None
+    setup_id: UUIDText | None
 
     @classmethod
     def from_domain(cls, recommendation: Recommendation) -> "RecommendationDTO":
@@ -253,7 +270,7 @@ class DecisionConfigurationDTO:
     market_regime_version: int
     stable_reserve_version: int
     whole_plan_version: int
-    target_runway_months: str
+    target_runway_months: DecimalText
     market_source: str
     ai_enabled: bool
     model_name: str | None
@@ -261,7 +278,7 @@ class DecisionConfigurationDTO:
     ai_context_version: int | None
     ai_schema_version: int | None
     ai_prompt_version: int | None
-    ai_failure_category: str | None
+    ai_failure_category: Annotated[str, enum_text(FailureCategory)] | None
     recommendation_parameters: str
     active_policy_parameters: str | None
     reserve_policy_parameters: str | None
@@ -289,7 +306,7 @@ class DecisionConfigurationDTO:
 
 @dataclass(frozen=True, slots=True)
 class SetupLevelDTO:
-    price: str
+    price: DecimalText
     source: str
     priority: int
 
@@ -306,13 +323,13 @@ class SetupScoreDTO:
 
 @dataclass(frozen=True, slots=True)
 class TriggerTransitionDTO:
-    previous_state: str
-    current_state: str
-    transitioned_at: str
-    market_cutoff: str
-    timeframe: str
-    reason: str
-    reference_price: str
+    previous_state: Annotated[str, enum_text(SetupStatus)]
+    current_state: Annotated[str, enum_text(SetupStatus)]
+    transitioned_at: UTCText
+    market_cutoff: UTCText
+    timeframe: Annotated[str, enum_text(TriggerTimeframe)]
+    reason: Annotated[str, enum_text(TriggerReason)]
+    reference_price: DecimalText
 
     @classmethod
     def from_domain(cls, transition: TriggerTransition) -> "TriggerTransitionDTO":
@@ -330,18 +347,18 @@ class TriggerTransitionDTO:
 @dataclass(frozen=True, slots=True)
 class TriggerContextDTO:
     version: int
-    zone_low: str
-    zone_high: str
-    atr_at_creation: str
+    zone_low: DecimalText
+    zone_high: DecimalText
+    atr_at_creation: DecimalText
     transitions: tuple[TriggerTransitionDTO, ...]
-    touched_at: str | None
-    highest_observed_price: str | None
-    lowest_observed_price: str | None
-    trigger_reference_price: str | None
-    confirmation_at: str | None
+    touched_at: UTCText | None
+    highest_observed_price: DecimalText | None
+    lowest_observed_price: DecimalText | None
+    trigger_reference_price: DecimalText | None
+    confirmation_at: UTCText | None
     confirmation_candle: CandleDTO | None
-    expires_at: str | None
-    last_processed_1h_candle_at: str | None
+    expires_at: UTCText | None
+    last_processed_1h_candle_at: UTCText | None
     execution_valid: bool
 
     @classmethod
@@ -368,23 +385,23 @@ class TriggerContextDTO:
 
 @dataclass(frozen=True, slots=True)
 class TradeSetupDTO:
-    id: str
+    id: UUIDText
     asset: str
-    direction: str
-    setup_type: str
-    created_at: str
-    originating_cutoff: str
-    status: str
-    limit_price: str
+    direction: Annotated[str, enum_text(TradingSide)]
+    setup_type: Annotated[str, enum_text(SetupType)]
+    created_at: UTCText
+    originating_cutoff: UTCText
+    status: Annotated[str, enum_text(SetupStatus)]
+    limit_price: DecimalText
     price_source: str
-    invalidation_price: str
+    invalidation_price: DecimalText
     invalidation_source: str
-    target_price: str
+    target_price: DecimalText
     target_source: str
-    risk_reward: str
-    maximum_capital_usd: str
+    risk_reward: DecimalText
+    maximum_capital_usd: DecimalText
     score: SetupScoreDTO
-    related_order_ids: tuple[str, ...]
+    related_order_ids: tuple[UUIDText, ...]
     levels: tuple[SetupLevelDTO, ...]
     trigger: TriggerContextDTO | None
 
@@ -416,15 +433,15 @@ class TradeSetupDTO:
 @dataclass(frozen=True, slots=True)
 class AssetDecisionDTO:
     asset: str
-    decision: str
-    quantity: str
-    market_value_usd: str
-    allocation_percent: str
-    core_floor: str | None
-    preferred_core: str | None
-    tradable_quantity: str
-    daily_trend: str
-    setup_id: str | None
+    decision: Annotated[str, enum_text(AssetDecisionType)]
+    quantity: DecimalText
+    market_value_usd: DecimalText
+    allocation_percent: DecimalText
+    core_floor: DecimalText | None
+    preferred_core: DecimalText | None
+    tradable_quantity: DecimalText
+    daily_trend: Annotated[str, enum_text(DailyTrend)]
+    setup_id: UUIDText | None
 
     @classmethod
     def from_domain(cls, decision: AssetDecision) -> "AssetDecisionDTO":
@@ -447,10 +464,10 @@ class ActiveAnalysisDTO:
     policy_version: int
     setups: tuple[TradeSetupDTO, ...]
     asset_decisions: tuple[AssetDecisionDTO, ...]
-    ranked_setup_ids: tuple[str, ...]
-    recommended_deployment_usd: str
-    strategy_dry_powder_usd: str
-    severity: str
+    ranked_setup_ids: tuple[UUIDText, ...]
+    recommended_deployment_usd: DecimalText
+    strategy_dry_powder_usd: DecimalText
+    severity: Annotated[str, enum_text(TelegramSeverity)]
 
     @classmethod
     def from_domain(cls, active: ActiveAnalysis) -> "ActiveAnalysisDTO":
@@ -467,18 +484,18 @@ class ActiveAnalysisDTO:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisResultDTO:
-    run_id: str
-    snapshot_id: str
-    generated_at: str
-    market_cutoff: str | None
+    run_id: UUIDText
+    snapshot_id: UUIDText
+    generated_at: UTCText
+    market_cutoff: UTCText | None
     market: MarketSnapshotDTO
-    market_regime: str
+    market_regime: Annotated[str, enum_text(MarketRegime)]
     regime_policy_version: int
     recommendation_policy_version: int
     financial: FinancialSummaryDTO
     warnings: tuple[str, ...]
     recommendations: tuple[RecommendationDTO, ...]
-    reasoning_mode: str
+    reasoning_mode: Annotated[str, enum_text(ReasoningMode)]
     reasoning_model: str | None
     ai_warning: str | None
     configuration: DecisionConfigurationDTO | None
@@ -512,7 +529,7 @@ class AnalysisResultDTO:
 class AnalysisDetailDTO:
     run: AnalysisRunDTO
     result: AnalysisResultDTO | None
-    failure_category: str | None
+    failure_category: Annotated[str, enum_text(FailureCategory)] | None
 
     @classmethod
     def from_domain(cls, detail: AnalysisRunDetail) -> "AnalysisDetailDTO":

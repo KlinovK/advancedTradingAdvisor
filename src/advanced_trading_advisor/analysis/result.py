@@ -329,6 +329,15 @@ class AnalysisResultCodec:
 
     @staticmethod
     def encode(result: AnalysisResult) -> str:
+        version = (
+            5
+            if result.active is not None and result.active.policy_version >= 2
+            else 4
+            if result.active is not None
+            else 3
+            if result.configuration is not None
+            else 2
+        )
         assets = []
         for a in result.market.assets:
             asset_data = {
@@ -383,7 +392,11 @@ class AnalysisResultCodec:
             "warnings": list(result.warnings),
             "analyzed_assets": assets,
             "recommendations": [
-                {f.name: _encode_value(getattr(r, f.name)) for f in fields(Recommendation)}
+                {
+                    f.name: _encode_value(getattr(r, f.name))
+                    for f in fields(Recommendation)
+                    if version >= 5 or f.name != "setup_id"
+                }
                 for r in result.recommendations
             ],
         }
@@ -395,15 +408,12 @@ class AnalysisResultCodec:
             data["configuration"] = config
         if result.active is not None:
             data["active"] = asdict(result.active)
+            if version < 5:
+                for setup in data["active"]["setups"]:
+                    setup.pop("trigger")
         return json.dumps(
             {
-                "schema_version": 5
-                if result.active is not None and result.active.policy_version >= 2
-                else 4
-                if result.active is not None
-                else 3
-                if result.configuration is not None
-                else 2,
+                "schema_version": version,
                 "data": data,
             },
             sort_keys=True,
