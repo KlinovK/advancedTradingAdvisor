@@ -15,9 +15,10 @@ from advanced_trading_advisor.analysis.repositories import AnalysisRunRepository
 from advanced_trading_advisor.domain.numeric import parse_decimal
 from advanced_trading_advisor.domain.persistence import RevisionConflictError, StateConflictError
 from advanced_trading_advisor.domain.validation import DomainValidationError, ResourceNotFoundError
+from advanced_trading_advisor.portfolio.add_limit_order import AddLimitOrder, AddLimitOrderCommand
 from advanced_trading_advisor.portfolio.confirmed_state import ConfirmedStateService
 from advanced_trading_advisor.portfolio.create_account import CreateAccount, CreateAccountCommand
-from advanced_trading_advisor.portfolio.models import AssetPosition
+from advanced_trading_advisor.portfolio.models import AssetPosition, LimitOrderStatus
 from advanced_trading_advisor.portfolio.remove_account import RemoveAccount, RemoveAccountCommand
 from advanced_trading_advisor.portfolio.rename_account import RenameAccount, RenameAccountCommand
 from advanced_trading_advisor.portfolio.repositories import SnapshotRepository
@@ -33,6 +34,10 @@ from advanced_trading_advisor.portfolio.update_financial_settings import (
     UpdateFinancialSettings,
     UpdateFinancialSettingsCommand,
 )
+from advanced_trading_advisor.portfolio.update_limit_order_status import (
+    UpdateLimitOrderStatus,
+    UpdateLimitOrderStatusCommand,
+)
 from advanced_trading_advisor.storage.factory import create_storage
 from advanced_trading_advisor.storage.settings import StorageBackend, StorageSettings
 
@@ -46,6 +51,7 @@ from .account_dtos import (
 from .analysis_dtos import AnalysisDetailDTO, RecentAnalysesDTO
 from .auth import APITokenSettings, UnauthorizedError, bearer_authentication
 from .dtos import CurrentPortfolioDTO
+from .order_dtos import AddLimitOrderInputDTO, OrderLifecycleInputDTO
 from .policy_dtos import UpdateCorePositionInputDTO, UpdateFinancialSettingsInputDTO
 
 
@@ -100,6 +106,8 @@ def create_app(
     remove_account: RemoveAccount | None = None,
     update_financial_settings: UpdateFinancialSettings | None = None,
     update_core_position: UpdateCorePosition | None = None,
+    add_limit_order: AddLimitOrder | None = None,
+    update_limit_order_status: UpdateLimitOrderStatus | None = None,
 ) -> FastAPI:
     """Compose without connecting, initializing, or migrating storage.
 
@@ -137,6 +145,12 @@ def create_app(
     )
     core_updater = (
         update_core_position if update_core_position is not None else UpdateCorePosition(snapshots)
+    )
+    order_adder = add_limit_order if add_limit_order is not None else AddLimitOrder(snapshots)
+    order_status_updater = (
+        update_limit_order_status
+        if update_limit_order_status is not None
+        else UpdateLimitOrderStatus(snapshots)
     )
     history = AnalysisHistoryQuery(analyses) if analyses is not None else None
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -246,6 +260,50 @@ def create_app(
                     symbol,
                     parse_decimal(body.hard_floor, positive=True),
                     parse_decimal(body.preferred_quantity, positive=True),
+                )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/portfolio/orders", dependencies=[Depends(authenticate)], status_code=201)
+    async def add_portfolio_order(body: AddLimitOrderInputDTO) -> JSONResponse:
+        try:
+            current = await order_adder.execute(
+                AddLimitOrderCommand(
+                    expected_revision=body.expected_revision,
+                    account_id=body.account_id,
+                    asset=body.asset,
+                    side=body.side,
+                    target_price=parse_decimal(body.target_price, positive=True),
+                    quantity_asset=parse_decimal(body.quantity_asset, positive=True),
+                )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, status_code=201, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/portfolio/orders/{order_id}/cancel", dependencies=[Depends(authenticate)])
+    async def cancel_portfolio_order(order_id: UUID, body: OrderLifecycleInputDTO) -> JSONResponse:
+        try:
+            current = await order_status_updater.execute(
+                UpdateLimitOrderStatusCommand(
+                    body.expected_revision, order_id, LimitOrderStatus.CANCELLED
+                )
+            )
+            payload = asdict(CurrentPortfolioDTO.from_domain(current))
+        except Exception as error:
+            return write_error_response(error)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/portfolio/orders/{order_id}/expire", dependencies=[Depends(authenticate)])
+    async def expire_portfolio_order(order_id: UUID, body: OrderLifecycleInputDTO) -> JSONResponse:
+        try:
+            current = await order_status_updater.execute(
+                UpdateLimitOrderStatusCommand(
+                    body.expected_revision, order_id, LimitOrderStatus.EXPIRED
                 )
             )
             payload = asdict(CurrentPortfolioDTO.from_domain(current))

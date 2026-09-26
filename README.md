@@ -12,7 +12,7 @@ Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
 CI never invokes live market, OpenAI, Telegram, analysis, or scheduler commands.
 
-## Private HTTP portfolio and analysis API (Steps 8B–8E)
+## Private HTTP portfolio and analysis API (Steps 8B–8F.1)
 
 The ASGI adapter exposes authenticated `GET /v1/portfolio`, `GET /v1/analyses/latest`,
 `GET /v1/analyses?limit=N`, and `GET /v1/analyses/{run_id}`. The portfolio route reads the current
@@ -49,6 +49,17 @@ one global core-position policy using the canonical uppercase asset symbol in th
 requires `expected_revision`, `hard_floor`, and `preferred_quantity`. All policy quantities are
 decimal JSON strings. Both return the complete updated portfolio (`200`). A `409 revision_conflict`
 means reload and review before another submission, not automatic retry.
+
+Authenticated `POST /v1/portfolio/orders` records a spot limit order using `expected_revision`,
+an explicit account UUID (`account_id`), canonical uppercase `asset`, `side` (`buy` or `sell`),
+and decimal-string `target_price` and `quantity_asset`. The application owns order identity,
+OPEN status, and timestamps; no default account is inferred. Authenticated
+`POST /v1/portfolio/orders/{order_id}/cancel` and
+`POST /v1/portfolio/orders/{order_id}/expire` take only `expected_revision` and apply fixed
+CANCELLED/EXPIRED transitions without changing holdings. Successful responses contain the complete
+updated portfolio (`201` for creation, `200` for transitions). A `409 revision_conflict` requires
+reload/review, not automatic retry. FILLED and client-selected status are intentionally not exposed;
+these operations do not execute or cancel anything on an exchange.
 
 Install the project dependencies, then configure `ADVISOR_API_TOKEN`,
 `ADVISOR_STORAGE_BACKEND=postgres`, and `ADVISOR_DATABASE_URL` in the HTTP process's private
