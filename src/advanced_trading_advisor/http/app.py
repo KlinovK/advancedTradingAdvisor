@@ -1,7 +1,7 @@
 """Production PostgreSQL composition and private HTTP portfolio/analysis routes."""
 
 import os
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -63,6 +63,7 @@ from .order_dtos import (
 )
 from .policy_dtos import UpdateCorePositionInputDTO, UpdateFinancialSettingsInputDTO
 from .schema import WRITE_ERRORS, error_schemas
+from .status_dtos import HealthDTO, ReadinessDTO
 
 
 def error_response(
@@ -119,6 +120,7 @@ def create_app(
     add_limit_order: AddLimitOrder | None = None,
     update_limit_order_status: UpdateLimitOrderStatus | None = None,
     confirm_limit_order_filled: ConfirmLimitOrderFilled | None = None,
+    readiness_check: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     """Compose without connecting, initializing, or migrating storage.
 
@@ -135,6 +137,8 @@ def create_app(
                 raise ValueError("PostgreSQL is required for HTTP production storage.")
             storage = create_storage(storage_settings)
             snapshots = storage.snapshots
+            if readiness_check is None:
+                readiness_check = storage.database.check_ready
             if analyses is None:
                 analyses = storage.analyses
         except (TypeError, ValueError):
@@ -476,5 +480,24 @@ def create_app(
         except Exception:
             return error_response(500, "internal_error", "Analysis could not be loaded.")
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.get("/health", response_model=HealthDTO)
+    async def health() -> JSONResponse:
+        return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/ready", response_model=ReadinessDTO, responses={503: {"model": ReadinessDTO}})
+    async def ready() -> JSONResponse:
+        try:
+            if readiness_check is None:
+                raise RuntimeError("Readiness check is not configured.")
+            await readiness_check()
+        except Exception:
+            # Never render a driver error, connection URL, or schema detail.
+            return JSONResponse(
+                {"status": "not_ready"},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse({"status": "ready"}, headers={"Cache-Control": "no-store"})
 
     return app

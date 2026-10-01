@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: advanced-trading-advisor-http
+    runtime: python
+    buildCommand: pip install .
+    startCommand: python -m advanced_trading_advisor.http.serve
+    healthCheckPath: /health
+    envVars:
+      - key: ADVISOR_STORAGE_BACKEND
+        value: postgres
+      - key: ADVISOR_DATABASE_URL
+        sync: false
+      - key: ADVISOR_API_TOKEN
+        sync: false

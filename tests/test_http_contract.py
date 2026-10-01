@@ -40,7 +40,12 @@ def app():
 
 def test_openapi_exact_surface_security_and_success_models(app):
     schema = app.openapi()
-    actual = {(method, path) for path, methods in schema["paths"].items() for method in methods}
+    actual = {
+        (method, path)
+        for path, methods in schema["paths"].items()
+        if path.startswith("/v1/")
+        for method in methods
+    }
     assert actual == set(OPERATIONS)
     assert len(actual) == 14
     assert schema["components"]["securitySchemes"]["BearerAuth"] == {
@@ -231,7 +236,7 @@ def test_normalized_framework_errors(app, method, path, content, status, code, m
         assert response.headers["allow"] == "GET"
 
 
-@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json", "/health", "/ready"])
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
 def test_no_public_docs_or_extra_routes(app, path):
     response = request(app, "GET", path)
     assert response.status_code == 404

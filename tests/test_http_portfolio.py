@@ -293,9 +293,14 @@ def test_production_composition_requires_postgres_without_connecting(monkeypatch
     def fake_create_storage(settings):
         calls.append(settings)
 
+        class Database:
+            async def check_ready(self):
+                raise AssertionError("Startup must not check database readiness.")
+
         class Bundle:
             snapshots = FakeSnapshots(None)
             analyses = object()
+            database = Database()
 
         return Bundle()
 
@@ -338,4 +343,6 @@ def test_only_implemented_routes_are_exposed_with_dedicated_fill_not_generic_sta
         ("/v1/analyses/latest", {"GET"}),
         ("/v1/analyses", {"GET"}),
         ("/v1/analyses/{run_id}", {"GET"}),
+        ("/health", {"GET"}),
+        ("/ready", {"GET"}),
     ]

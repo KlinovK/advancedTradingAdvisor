@@ -11,6 +11,7 @@ from advanced_trading_advisor.domain.validation import require
 from .postgres_schema import POSTGRES_COLUMNS, POSTGRES_MIGRATIONS, POSTGRES_SCHEMA_VERSION
 
 SCHEMA_LOCK = 6_416_892_125_109_931_071
+READINESS_TIMEOUT_SECONDS = 15
 
 
 class PostgresDatabase:
@@ -126,6 +127,13 @@ class PostgresDatabase:
         async with self.connection() as connection:
             async with connection.transaction():
                 yield connection
+
+    async def check_ready(self) -> None:
+        """Check connectivity and the current schema without changing durable state."""
+        async with asyncio.timeout(READINESS_TIMEOUT_SECONDS):
+            async with self.connection() as connection:
+                async with connection.transaction(readonly=True):
+                    await self._validate_schema(connection)
 
     async def initialize(self, *, create_parent: bool = False) -> None:
         require(type(create_parent) is bool, "Invalid parent-creation flag.")

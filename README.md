@@ -92,8 +92,32 @@ Do not place the token in source control or a command-line argument. Start the A
 .venv/bin/uvicorn advanced_trading_advisor.http.app:create_app --factory --host 127.0.0.1
 ```
 
-Use a trusted HTTPS termination layer before exposing this private endpoint remotely. No cloud
-deployment or public HTTP binding is configured by this step.
+For local development, keep the loopback bind above and load configuration privately in that
+process. The HTTP factory reads process environment only; it does not load `.env` or connect to
+PostgreSQL during startup. It does not require CoinGecko, OpenAI, or Telegram configuration.
+
+For a later Render deployment, `render.yaml` defines **only** the ATA HTTP web service. Render's
+Python runtime uses `.python-version` (3.13); `pip install .` installs the project; and
+`python -m advanced_trading_advisor.http.serve` binds `0.0.0.0:$PORT` after validating the assigned
+port. The Blueprint declares `ADVISOR_STORAGE_BACKEND=postgres` and prompts for the private
+`ADVISOR_DATABASE_URL` and `ADVISOR_API_TOKEN` values (`sync: false`); never commit either value.
+Use Render's trusted HTTPS ingress, not a directly exposed plaintext HTTP listener. The GitHub
+Actions scheduler remains separate and continues to use `advisor scheduler dispatch`.
+
+`GET /health` is public process liveness and never accesses PostgreSQL. `GET /ready` is public,
+bounded, read-only database/schema readiness: it returns `200 {"status":"ready"}` only for the
+current PostgreSQL schema, or sanitized `503 {"status":"not_ready"}` otherwise. An initialized
+schema without a portfolio is ready. Neither endpoint reveals credentials or prepares storage.
+
+**Database preparation is a separate operator action, not a deployment/startup hook.** Before
+first production use, prepare a clean PostgreSQL application database/schema, run the supported
+application-managed schema initialization through confirmed `advisor setup`, then confirm an
+initial portfolio before relying on HTTP portfolio reads or the scheduler. `setup` applies schema
+migrations v1–v3 and requires explicit `yes` before persisting the portfolio. There is no Alembic
+workflow or public setup/reset endpoint. Current `SnapshotCodec` accepts portfolio payload v4
+only; v1–v3 relational migrations do not transform old snapshot JSON. Do not point this service
+or scheduler at older cloud application data without a separately authorized compatibility check
+or reset/reinitialization. Creating `render.yaml` does not deploy or modify cloud state.
 
 All financial inputs are finite Decimal values. Positions, expenses, runway, prices and quantities
 must be strictly positive; omit zero-balance positions. An empty portfolio is allowed.
