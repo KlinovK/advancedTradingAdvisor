@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.konstantinklinov.binance-snapshot.hourly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/konstantinklinov/Developer/advancedTradingAdvisor/binance-snapshot/.venv/bin/python</string>
+        <string>/Users/konstantinklinov/Developer/advancedTradingAdvisor/binance-snapshot/hourly_snapshot.py</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>7</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/konstantinklinov/Library/Logs/binance-snapshot-hourly.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/konstantinklinov/Library/Logs/binance-snapshot-hourly.err.log</string>
+</dict>
+</plist>

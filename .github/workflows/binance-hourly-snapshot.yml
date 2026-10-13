@@ -1,0 +1,38 @@
+name: Binance snapshot validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: binance-snapshot
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install component dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run offline component tests
+        run: python -m pytest -q tests
+
+      - name: Run component Ruff lint
+        run: ruff check .
+
+      - name: Check component Ruff formatting
+        run: ruff format --check .

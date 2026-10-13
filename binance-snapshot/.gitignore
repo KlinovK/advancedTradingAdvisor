@@ -1,0 +1,8 @@
+# Local legacy prototype and transient files; the production entry point is snapshot.py.
+/snapshot_backup.py
+/hourly.lock
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
