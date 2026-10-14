@@ -22,6 +22,16 @@ loaded only when a sending command reaches the delivery step.
 Run the manual snapshot with `.venv/bin/python snapshot.py`. It fetches public Binance
 Spot market data; no API key is required.
 
+Binance requests use `https://api.binance.com` by default. To select Binance's
+official public market-data endpoint for a process, set
+`BINANCE_API_BASE_URL=https://data-api.binance.vision` in its environment. The
+only accepted values are those two exact HTTPS base URLs. The selected host is
+used for server time, 24-hour tickers, and klines; the hourly runner keeps one
+selection for its entire invocation. An invalid value fails before any Binance
+request or Telegram delivery. There is no automatic fallback after an HTTP 451
+or any other failure. Endpoint availability and permission to use it in a
+deployment location must be confirmed independently.
+
 To install test tools and run the offline regression suite:
 
 ```sh

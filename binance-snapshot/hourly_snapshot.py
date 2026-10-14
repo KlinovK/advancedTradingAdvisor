@@ -15,7 +15,6 @@ from typing import Literal
 
 import requests
 from market_data import (
-    BASE_URL,
     BinanceClient,
     BinanceRequestError,
     DiagnosticCode,
@@ -23,6 +22,7 @@ from market_data import (
     collect_snapshot,
     expected_cutoff,
     http_diagnostic_code,
+    resolve_binance_base_url,
 )
 from models import MarketDataError, MarketSnapshot, Timeframe
 from snapshot import SYMBOLS
@@ -80,13 +80,17 @@ class ServerClock:
 
 
 def fetch_server_clock(
-    session: requests.Session, *, now: Callable[[], datetime] | None = None
+    session: requests.Session,
+    *,
+    base_url: str | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> ServerClock:
     """Read public Binance Spot time once; fail closed on delay or clock skew."""
     clock = now or (lambda: datetime.now(UTC))
     started = clock()
+    selected_base_url = resolve_binance_base_url(base_url)
     try:
-        response = session.get(f"{BASE_URL}/api/v3/time", timeout=(2.0, 3.0))
+        response = session.get(f"{selected_base_url}/api/v3/time", timeout=(2.0, 3.0))
     except requests.Timeout:
         raise HourlySnapshotError(
             "Binance server time is unavailable.", DiagnosticCode.TIMEOUT
@@ -244,14 +248,17 @@ def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) ->
                 return 0
             with requests.Session() as session:
                 phase = "initial_clock"
-                starting_clock = fetch_server_clock(session)
+                base_url = resolve_binance_base_url()
+                starting_clock = fetch_server_clock(session, base_url=base_url)
                 eligible_close(starting_clock)
                 phase = "collection"
-                snapshot = collect_snapshot(BinanceClient(session), SYMBOLS, starting_clock.now)
+                snapshot = collect_snapshot(
+                    BinanceClient(session, base_url=base_url), SYMBOLS, starting_clock.now
+                )
                 message = format_telegram_snapshot(snapshot)
                 config = None if arguments.check else load_config()
                 phase = "pre_send_clock"
-                final_clock = fetch_server_clock(session)
+                final_clock = fetch_server_clock(session, base_url=base_url)
                 phase = "validation"
                 validate_snapshot(snapshot, final_clock)
             if arguments.check:

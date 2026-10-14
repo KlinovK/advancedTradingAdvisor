@@ -15,7 +15,13 @@ import hourly_snapshot
 import pytest
 import requests
 from conftest import candle
-from market_data import BinanceRequestError, DiagnosticCode, FreshnessMarketDataError
+from market_data import (
+    BASE_URL,
+    MARKET_DATA_BASE_URL,
+    BinanceRequestError,
+    DiagnosticCode,
+    FreshnessMarketDataError,
+)
 from models import AssetMarketData, MarketDataError, MarketSnapshot, Ticker, Timeframe
 from snapshot import SYMBOLS
 from telegram_notifier import TelegramConfig, TelegramDeliveryError
@@ -551,4 +557,80 @@ def test_skip_never_prints_an_unexpected_exception_message(
     assert output.out == "Hourly snapshot skipped: No fresh hourly candle is eligible now.\n"
     assert "secret" not in output.out + output.err
     collector.assert_not_called()
+    sender.assert_not_called()
+
+
+def test_clock_uses_official_market_data_endpoint() -> None:
+    session = Mock()
+    session.get.return_value.status_code = 200
+    session.get.return_value.json.return_value = {"serverTime": int(REFERENCE.timestamp() * 1000)}
+    clock = hourly_snapshot.fetch_server_clock(
+        session, base_url=MARKET_DATA_BASE_URL, now=lambda: REFERENCE
+    )
+    assert clock.now == REFERENCE
+    session.get.assert_called_once_with(f"{MARKET_DATA_BASE_URL}/api/v3/time", timeout=(2.0, 3.0))
+
+
+def test_runner_pins_one_endpoint_for_both_clocks_and_collection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", MARKET_DATA_BASE_URL)
+    clocks, collector, _, sender = runner_mocks(monkeypatch)
+    calls = 0
+
+    def clock(_session: object, *, base_url: str) -> hourly_snapshot.ServerClock:
+        nonlocal calls
+        calls += 1
+        assert base_url == MARKET_DATA_BASE_URL
+        if calls == 1:
+            monkeypatch.setenv("BINANCE_API_BASE_URL", BASE_URL)
+        return hourly_snapshot.ServerClock(REFERENCE)
+
+    clocks.side_effect = clock
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
+    assert calls == 2
+    assert collector.call_args.args[0]._base_url == MARKET_DATA_BASE_URL
+    sender.assert_called_once()
+
+
+def test_invalid_endpoint_prevents_all_requests_and_telegram_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", "https://user:secret@api.binance.com")
+    clocks, collector, loader, sender = runner_mocks(monkeypatch)
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == (
+        "Hourly snapshot unavailable (phase=initial_clock, reason=invalid_market_data); "
+        "no further send attempt will be made.\n"
+    )
+    assert "secret" not in output.err
+    clocks.assert_not_called()
+    collector.assert_not_called()
+    loader.assert_not_called()
+    sender.assert_not_called()
+
+
+def test_http_451_from_selected_clock_endpoint_prevents_telegram_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", MARKET_DATA_BASE_URL)
+    real_fetch = hourly_snapshot.fetch_server_clock
+    _, collector, loader, sender = runner_mocks(monkeypatch)
+    monkeypatch.setattr(hourly_snapshot, "fetch_server_clock", real_fetch)
+    session = hourly_snapshot.requests.Session()
+    session.get.return_value.status_code = 451
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
+    session.get.assert_called_once_with(f"{MARKET_DATA_BASE_URL}/api/v3/time", timeout=(2.0, 3.0))
+    assert capsys.readouterr().err == (
+        "Hourly snapshot unavailable (phase=initial_clock, reason=http_451); "
+        "no further send attempt will be made.\n"
+    )
+    collector.assert_not_called()
+    loader.assert_not_called()
     sender.assert_not_called()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,8 @@ import requests
 from models import AssetMarketData, Candle, MarketDataError, MarketSnapshot, Ticker, Timeframe
 
 BASE_URL = "https://api.binance.com"
+MARKET_DATA_BASE_URL = "https://data-api.binance.vision"
+ALLOWED_BASE_URLS = frozenset((BASE_URL, MARKET_DATA_BASE_URL))
 KLINE_LIMIT = 100
 BOUNDARY_GRACE = timedelta(seconds=30)
 MAX_TICKER_AGE = timedelta(minutes=5)
@@ -20,6 +23,14 @@ MAX_CLOCK_SKEW = timedelta(seconds=10)
 RUN_DEADLINE_SECONDS = 90.0
 MAX_ATTEMPTS = 2
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def resolve_binance_base_url(value: str | None = None) -> str:
+    """Select one official Spot endpoint, without implicit fallback."""
+    selected = os.environ.get("BINANCE_API_BASE_URL", BASE_URL) if value is None else value
+    if selected not in ALLOWED_BASE_URLS:
+        raise MarketDataError("Binance API base URL is not supported.")
+    return selected
 
 
 class DiagnosticCode(StrEnum):
@@ -174,11 +185,13 @@ class BinanceClient:
         self,
         session: requests.Session,
         *,
+        base_url: str | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._session = session
+        self._base_url = resolve_binance_base_url(base_url)
         self._monotonic = monotonic
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(UTC))
@@ -197,7 +210,7 @@ class BinanceClient:
             status_code = None
             try:
                 response = self._session.get(
-                    f"{BASE_URL}{path}",
+                    f"{self._base_url}{path}",
                     params=params,
                     timeout=(min(3.0, remaining), min(8.0, remaining)),
                 )

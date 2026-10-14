@@ -14,6 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from models import Candle, Ticker, Timeframe
 
 
+@pytest.fixture(autouse=True)
+def isolate_binance_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep endpoint tests independent of the developer's shell configuration."""
+    monkeypatch.delenv("BINANCE_API_BASE_URL", raising=False)
+
+
 @pytest.fixture
 def reference_time() -> datetime:
     return datetime(2025, 1, 2, 8, 0, 31, tzinfo=UTC)

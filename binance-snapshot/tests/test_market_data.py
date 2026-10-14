@@ -9,6 +9,8 @@ import pytest
 import requests
 from conftest import candle, kline_row, ticker
 from market_data import (
+    BASE_URL,
+    MARKET_DATA_BASE_URL,
     BinanceClient,
     BinanceRequestError,
     DiagnosticCode,
@@ -17,6 +19,7 @@ from market_data import (
     expected_cutoff,
     parse_closed_klines,
     parse_ticker,
+    resolve_binance_base_url,
 )
 from models import MarketDataError, Timeframe
 
@@ -249,3 +252,90 @@ def test_stale_ticker_has_freshness_type() -> None:
     }
     with pytest.raises(FreshnessMarketDataError):
         parse_ticker(payload, "BTCUSDT", reference)
+
+
+def test_default_binance_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BINANCE_API_BASE_URL", raising=False)
+    assert resolve_binance_base_url() == BASE_URL
+    session = Mock(spec=requests.Session)
+    session.get.return_value = response(200, {})
+    BinanceClient(session, monotonic=lambda: 0.0)._request_json("/api/v3/ping", {}, 10.0)
+    assert session.get.call_args.args[0] == f"{BASE_URL}/api/v3/ping"
+
+
+def test_official_market_data_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", MARKET_DATA_BASE_URL)
+    assert resolve_binance_base_url() == MARKET_DATA_BASE_URL
+    session = Mock(spec=requests.Session)
+    session.get.return_value = response(200, {})
+    BinanceClient(session, monotonic=lambda: 0.0)._request_json("/api/v3/ping", {}, 10.0)
+    assert session.get.call_args.args[0] == f"{MARKET_DATA_BASE_URL}/api/v3/ping"
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "",
+        "http://api.binance.com",
+        "https://api.binance.com/",
+        "https://api.binance.com.evil.example",
+        "https://user@api.binance.com",
+        "https://data-api.binance.vision?key=secret",
+        " https://api.binance.com",
+        "https://api.binance.com\n",
+    ],
+)
+def test_invalid_endpoint_is_rejected_without_network_or_value_leak(
+    invalid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", invalid)
+    session = Mock(spec=requests.Session)
+    with pytest.raises(MarketDataError) as caught:
+        BinanceClient(session)
+    assert str(caught.value) == "Binance API base URL is not supported."
+    session.get.assert_not_called()
+
+
+def test_http_451_never_falls_back_to_another_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", MARKET_DATA_BASE_URL)
+    session = Mock(spec=requests.Session)
+    session.get.return_value = response(451)
+    client = BinanceClient(session, monotonic=lambda: 0.0)
+    with pytest.raises(BinanceRequestError) as caught:
+        client._request_json("/api/v3/klines", {}, 10.0)
+    assert caught.value.code is DiagnosticCode.HTTP_451
+    session.get.assert_called_once()
+    assert session.get.call_args.args[0] == f"{MARKET_DATA_BASE_URL}/api/v3/klines"
+
+
+def test_ticker_and_both_kline_intervals_use_the_same_selected_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BINANCE_API_BASE_URL", MARKET_DATA_BASE_URL)
+    reference = datetime(2025, 1, 2, 8, 7, tzinfo=UTC)
+    session = Mock(spec=requests.Session)
+    session.get.side_effect = [
+        response(
+            200,
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "100",
+                "highPrice": "110",
+                "lowPrice": "90",
+                "closeTime": int(reference.timestamp() * 1000),
+            },
+        ),
+        response(200, [kline_row(datetime(2025, 1, 2, 7, tzinfo=UTC), Timeframe.H1)]),
+        response(200, [kline_row(datetime(2025, 1, 2, 4, tzinfo=UTC), Timeframe.H4)]),
+    ]
+    client = BinanceClient(session, monotonic=lambda: 0.0, now=lambda: reference)
+    client.fetch_ticker("BTCUSDT", 10.0)
+    client.fetch_klines("BTCUSDT", Timeframe.H1, reference, 10.0)
+    client.fetch_klines("BTCUSDT", Timeframe.H4, reference, 10.0)
+    assert [call.args[0] for call in session.get.call_args_list] == [
+        f"{MARKET_DATA_BASE_URL}/api/v3/ticker/24hr",
+        f"{MARKET_DATA_BASE_URL}/api/v3/klines",
+        f"{MARKET_DATA_BASE_URL}/api/v3/klines",
+    ]
