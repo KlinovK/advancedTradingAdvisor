@@ -145,3 +145,35 @@ duplicates. There is no persistent delivery state or automatic Telegram delivery
 retry. Read-only Binance GETs have at most two attempts under an overall deadline.
 Sleep after the final freshness check or an uncertain Telegram response can still
 affect delivery timing. No automatic trading occurs.
+
+## Proposed GitHub Actions hourly delivery (disabled)
+
+`.github/workflows/binance-hourly-scheduled.yml` prepares a lightweight,
+separate delivery job. It installs runtime dependencies and would run
+`python hourly_snapshot.py` using `https://data-api.binance.vision`. Offline
+tests stay in the existing validation workflow, so they do not delay the
+scheduled attempt. Component tests and Ruff must pass before publishing a
+future delivery change.
+
+**Scheduling is not active.** The new workflow has only `workflow_dispatch`,
+and its delivery job has a static `if: ${{ false }}` gate. The proposed future
+schedule, `5 * * * *` (HH:05 UTC), is a comment only. A separate reviewed change
+must add the schedule and remove the gate before it can send anything.
+
+GitHub may start scheduled workflows late or omit a run. The runner checks
+Binance server time and accepts a fully closed 1H candle only 2–15 minutes
+after its close; a late start or a run that crosses the deadline skips safely.
+This is best-effort hourly delivery, not a guarantee that every hour produces
+a message. The scheduled and manual delivery jobs share a GitHub concurrency
+group to prevent overlap, but sequential runs in one hour can still send
+duplicate messages. An active macOS LaunchAgent is outside that GitHub
+concurrency group and could also send the same candle; use only one automated
+delivery source. There is no persistent deduplication or automatic Telegram
+retry. Monitor actual delivery outcomes because a freshness skip exits
+successfully.
+
+If scheduling is activated later and must be rolled back, disable **Binance
+hourly scheduled delivery** in the repository's GitHub Actions page to stop
+new runs, inspect any queued or running run before retrying a message, and
+revert the activation change that added the cron and removed the static gate.
+The existing manual delivery workflow remains independent.
