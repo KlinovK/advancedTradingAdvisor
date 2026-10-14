@@ -104,3 +104,33 @@ jobs:
 
           sys.exit(1 if failed else 0)
           PY
+
+  full_analyzer:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: binance-snapshot
+    env:
+      BINANCE_API_BASE_URL: https://data-api.binance.vision
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install analyzer runtime dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate Binance server time and hourly eligibility without delivery
+        run: python hourly_snapshot.py --check
+
+      - name: Collect and analyze all six Spot symbols
+        run: python snapshot.py
