@@ -1,0 +1,106 @@
+name: Binance API connectivity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check official market-data routes
+        run: |
+          python - <<'PY'
+          import json
+          import socket
+          import sys
+          from decimal import Decimal, InvalidOperation
+          from urllib.error import HTTPError, URLError
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          BASE = "https://data-api.binance.vision"
+          ROUTES = (
+              ("time", "/api/v3/time"),
+              ("ticker_24hr", "/api/v3/ticker/24hr?symbol=BTCUSDT"),
+              ("klines_1h", "/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=2"),
+          )
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                  return None
+
+          def positive_number(value):
+              try:
+                  number = Decimal(str(value))
+              except (InvalidOperation, TypeError, ValueError):
+                  return False
+              return number.is_finite() and number > 0
+
+          def valid_payload(name, payload):
+              if name == "time":
+                  return isinstance(payload, dict) and type(payload.get("serverTime")) is int and payload["serverTime"] > 0
+              if name == "ticker_24hr":
+                  return isinstance(payload, dict) and payload.get("symbol") == "BTCUSDT" and positive_number(payload.get("lastPrice"))
+              return (
+                  isinstance(payload, list)
+                  and len(payload) == 2
+                  and all(
+                      isinstance(candle, list)
+                      and len(candle) >= 7
+                      and type(candle[0]) is int
+                      and type(candle[6]) is int
+                      and candle[6] > candle[0]
+                      and all(positive_number(candle[index]) for index in (1, 2, 3, 4))
+                      for candle in payload
+                  )
+              )
+
+          opener = build_opener(NoRedirect)
+          failed = False
+          for name, path in ROUTES:
+              status = "unavailable"
+              category = "none"
+              try:
+                  request = Request(BASE + path, method="GET")
+                  with opener.open(request, timeout=8) as response:
+                      status = str(response.status)
+                      body = response.read(65537)
+                  if status != "200":
+                      category = "http_other"
+                  elif len(body) > 65536:
+                      category = "invalid_payload"
+                  else:
+                      try:
+                          payload = json.loads(body)
+                      except (UnicodeDecodeError, json.JSONDecodeError):
+                          category = "invalid_json"
+                      else:
+                          if not valid_payload(name, payload):
+                              category = "invalid_payload"
+              except HTTPError as error:
+                  status = str(error.code)
+                  category = f"http_{error.code}" if error.code in (403, 429, 451) else "http_other"
+              except (TimeoutError, socket.timeout):
+                  category = "timeout"
+              except URLError as error:
+                  category = "timeout" if isinstance(error.reason, (TimeoutError, socket.timeout)) else "connection_error"
+              except (OSError, ValueError):
+                  category = "connection_error"
+              except Exception:
+                  category = "internal_error"
+
+              result = "PASS" if category == "none" and status == "200" else "FAIL"
+              failed |= result == "FAIL"
+              print(f"{name} status={status} {result} category={category}")
+
+          sys.exit(1 if failed else 0)
+          PY
