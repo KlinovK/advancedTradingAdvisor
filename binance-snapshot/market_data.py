@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
+from enum import StrEnum
 
 import requests
 from models import AssetMarketData, Candle, MarketDataError, MarketSnapshot, Ticker, Timeframe
@@ -19,6 +20,43 @@ MAX_CLOCK_SKEW = timedelta(seconds=10)
 RUN_DEADLINE_SECONDS = 90.0
 MAX_ATTEMPTS = 2
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+class DiagnosticCode(StrEnum):
+    """Allowlisted operational failure reasons, safe for stderr."""
+
+    HTTP_403 = "http_403"
+    HTTP_451 = "http_451"
+    HTTP_429 = "http_429"
+    HTTP_OTHER = "http_other"
+    CONNECTION_ERROR = "connection_error"
+    TIMEOUT = "timeout"
+    SERVER_TIME_INVALID = "server_time_invalid"
+    INVALID_MARKET_DATA = "invalid_market_data"
+    FRESHNESS_FAILURE = "freshness_failure"
+    LOCAL_IO_ERROR = "local_io_error"
+
+
+def http_diagnostic_code(status: int) -> DiagnosticCode:
+    """Classify an HTTP failure without retaining its body or URL."""
+    return {
+        403: DiagnosticCode.HTTP_403,
+        451: DiagnosticCode.HTTP_451,
+        429: DiagnosticCode.HTTP_429,
+    }.get(status, DiagnosticCode.HTTP_OTHER)
+
+
+class BinanceRequestError(MarketDataError):
+    """A Binance request failed with an allowlisted reason."""
+
+    def __init__(self, message: str, code: DiagnosticCode, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
+class FreshnessMarketDataError(MarketDataError):
+    """Market timestamps or closed-candle alignment failed validation."""
 
 
 def _from_milliseconds(value: object) -> datetime:
@@ -63,9 +101,9 @@ def parse_ticker(payload: object, symbol: str, received_at: datetime) -> Ticker:
     if received_at.tzinfo is None or received_at.utcoffset() != timedelta(0):
         raise MarketDataError("Ticker receipt time must be UTC.")
     if ticker.as_of > received_at + MAX_CLOCK_SKEW:
-        raise MarketDataError(f"{symbol} ticker timestamp is in the future.")
+        raise FreshnessMarketDataError(f"{symbol} ticker timestamp is in the future.")
     if received_at - ticker.as_of > MAX_TICKER_AGE:
-        raise MarketDataError(f"{symbol} ticker is stale.")
+        raise FreshnessMarketDataError(f"{symbol} ticker is stale.")
     return ticker
 
 
@@ -104,13 +142,15 @@ def parse_closed_klines(
     rows = tuple(parse_kline(row, symbol, timeframe) for row in payload)
     for previous, current in zip(rows, rows[1:], strict=False):
         if current.open_time != previous.close_time:
-            raise MarketDataError(f"{symbol} {timeframe} klines have a gap or duplicate.")
+            raise FreshnessMarketDataError(f"{symbol} {timeframe} klines have a gap or duplicate.")
     if any(row.open_time > reference_time + MAX_CLOCK_SKEW for row in rows):
-        raise MarketDataError(f"{symbol} {timeframe} contains a future candle.")
+        raise FreshnessMarketDataError(f"{symbol} {timeframe} contains a future candle.")
     cutoff = expected_cutoff(reference_time, timeframe)
     closed = tuple(row for row in rows if row.close_time <= cutoff)
     if not closed or closed[-1].close_time != cutoff:
-        raise MarketDataError(f"{symbol} {timeframe} latest closed candle is stale or absent.")
+        raise FreshnessMarketDataError(
+            f"{symbol} {timeframe} latest closed candle is stale or absent."
+        )
     return closed
 
 
@@ -150,7 +190,11 @@ class BinanceClient:
         for attempt in range(MAX_ATTEMPTS):
             remaining = deadline - self._monotonic()
             if remaining <= 0:
-                raise MarketDataError("Binance snapshot exceeded its overall time budget.")
+                raise BinanceRequestError(
+                    "Binance snapshot exceeded its overall time budget.", DiagnosticCode.TIMEOUT
+                )
+            code = DiagnosticCode.TIMEOUT
+            status_code = None
             try:
                 response = self._session.get(
                     f"{BASE_URL}{path}",
@@ -158,31 +202,49 @@ class BinanceClient:
                     timeout=(min(3.0, remaining), min(8.0, remaining)),
                 )
             except requests.RequestException as error:
+                code = (
+                    DiagnosticCode.TIMEOUT
+                    if isinstance(error, requests.Timeout)
+                    else DiagnosticCode.CONNECTION_ERROR
+                )
                 if attempt + 1 == MAX_ATTEMPTS:
-                    raise MarketDataError("Binance transport failed.") from error
+                    raise BinanceRequestError("Binance transport failed.", code) from error
                 delay = 0.25
             else:
                 if self._monotonic() >= deadline:
-                    raise MarketDataError("Binance snapshot exceeded its overall time budget.")
+                    raise BinanceRequestError(
+                        "Binance snapshot exceeded its overall time budget.", DiagnosticCode.TIMEOUT
+                    )
+                status_code = response.status_code
+                code = http_diagnostic_code(status_code)
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     if attempt + 1 == MAX_ATTEMPTS:
-                        raise MarketDataError(f"Binance HTTP {response.status_code} after retry.")
+                        raise BinanceRequestError(
+                            f"Binance HTTP {response.status_code} after retry.", code, status_code
+                        )
                     retry_after = _retry_after_seconds(
                         response.headers.get("Retry-After"), self._now()
                     )
                     delay = retry_after if retry_after is not None else 0.25
                 elif response.status_code >= 400:
-                    raise MarketDataError(f"Binance HTTP {response.status_code}.")
+                    raise BinanceRequestError(
+                        f"Binance HTTP {response.status_code}.", code, status_code
+                    )
                 else:
                     try:
                         result = response.json()
                     except ValueError as error:
                         raise MarketDataError("Binance returned malformed JSON.") from error
                     if self._monotonic() >= deadline:
-                        raise MarketDataError("Binance snapshot exceeded its overall time budget.")
+                        raise BinanceRequestError(
+                            "Binance snapshot exceeded its overall time budget.",
+                            DiagnosticCode.TIMEOUT,
+                        )
                     return result
             if delay > deadline - self._monotonic():
-                raise MarketDataError("Binance retry exceeds the overall time budget.")
+                raise BinanceRequestError(
+                    "Binance retry exceeds the overall time budget.", code, status_code
+                )
             self._sleep(delay)
         raise MarketDataError("Binance request failed.")
 
@@ -234,7 +296,11 @@ def collect_snapshot(
     for timeframe in timeframes:
         cutoffs = {asset.candles(timeframe)[-1].close_time for asset in assets}
         if len(cutoffs) != 1:
-            raise MarketDataError(f"{timeframe} closed-candle cutoffs differ across symbols.")
+            raise FreshnessMarketDataError(
+                f"{timeframe} closed-candle cutoffs differ across symbols."
+            )
     if client._monotonic() >= deadline:
-        raise MarketDataError("Binance snapshot exceeded its overall time budget.")
+        raise BinanceRequestError(
+            "Binance snapshot exceeded its overall time budget.", DiagnosticCode.TIMEOUT
+        )
     return MarketSnapshot(reference_time, tuple(assets))

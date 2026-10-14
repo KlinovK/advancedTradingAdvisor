@@ -10,9 +10,13 @@ import requests
 from conftest import candle, kline_row, ticker
 from market_data import (
     BinanceClient,
+    BinanceRequestError,
+    DiagnosticCode,
+    FreshnessMarketDataError,
     collect_snapshot,
     expected_cutoff,
     parse_closed_klines,
+    parse_ticker,
 )
 from models import MarketDataError, Timeframe
 
@@ -163,3 +167,85 @@ def test_malformed_json_fails_without_retry() -> None:
     with pytest.raises(MarketDataError, match="malformed JSON"):
         client._request_json("/api/v3/klines", {}, 10.0)
     session.get.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "attempts"),
+    [
+        (403, DiagnosticCode.HTTP_403, 1),
+        (451, DiagnosticCode.HTTP_451, 1),
+        (429, DiagnosticCode.HTTP_429, 2),
+        (400, DiagnosticCode.HTTP_OTHER, 1),
+        (503, DiagnosticCode.HTTP_OTHER, 2),
+    ],
+)
+def test_http_diagnostic_categories_preserve_retry_policy(
+    status: int, code: DiagnosticCode, attempts: int
+) -> None:
+    session = Mock(spec=requests.Session)
+    session.get.return_value = response(status)
+    sleep = Mock()
+    client = BinanceClient(session, monotonic=lambda: 0.0, sleep=sleep)
+    with pytest.raises(BinanceRequestError) as caught:
+        client._request_json("/api/v3/klines", {}, 10.0)
+    assert caught.value.code is code
+    assert caught.value.status_code == status
+    assert session.get.call_count == attempts
+    assert sleep.call_count == attempts - 1
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (requests.Timeout("secret URL"), DiagnosticCode.TIMEOUT),
+        (requests.ConnectionError("secret URL"), DiagnosticCode.CONNECTION_ERROR),
+    ],
+)
+def test_transport_diagnostics_preserve_retry_policy(
+    failure: requests.RequestException, code: DiagnosticCode
+) -> None:
+    session = Mock(spec=requests.Session)
+    session.get.side_effect = failure
+    sleep = Mock()
+    client = BinanceClient(session, monotonic=lambda: 0.0, sleep=sleep)
+    with pytest.raises(BinanceRequestError) as caught:
+        client._request_json("/api/v3/klines", {}, 10.0)
+    assert caught.value.code is code
+    assert caught.value.status_code is None
+    assert session.get.call_count == 2
+    sleep.assert_called_once_with(0.25)
+
+
+def test_retry_after_budget_keeps_http_category() -> None:
+    session = Mock(spec=requests.Session)
+    session.get.return_value = response(429, headers={"Retry-After": "30"})
+    client = BinanceClient(session, monotonic=lambda: 0.0, sleep=Mock())
+    with pytest.raises(BinanceRequestError) as caught:
+        client._request_json("/api/v3/klines", {}, 10.0)
+    assert caught.value.code is DiagnosticCode.HTTP_429
+    assert caught.value.status_code == 429
+
+
+def test_malformed_json_is_market_data_failure() -> None:
+    session = Mock(spec=requests.Session)
+    item = response(200)
+    item.json.side_effect = ValueError("response secret")
+    session.get.return_value = item
+    client = BinanceClient(session, monotonic=lambda: 0.0)
+    with pytest.raises(MarketDataError) as caught:
+        client._request_json("/api/v3/klines", {}, 10.0)
+    assert not isinstance(caught.value, BinanceRequestError)
+    session.get.assert_called_once()
+
+
+def test_stale_ticker_has_freshness_type() -> None:
+    reference = datetime(2025, 1, 2, 8, tzinfo=UTC)
+    payload = {
+        "symbol": "BTCUSDT",
+        "lastPrice": "1",
+        "highPrice": "2",
+        "lowPrice": "1",
+        "closeTime": int((reference - timedelta(minutes=6)).timestamp() * 1000),
+    }
+    with pytest.raises(FreshnessMarketDataError):
+        parse_ticker(payload, "BTCUSDT", reference)

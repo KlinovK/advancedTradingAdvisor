@@ -11,9 +11,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import requests
-from market_data import BASE_URL, BinanceClient, collect_snapshot, expected_cutoff
+from market_data import (
+    BASE_URL,
+    BinanceClient,
+    BinanceRequestError,
+    DiagnosticCode,
+    FreshnessMarketDataError,
+    collect_snapshot,
+    expected_cutoff,
+    http_diagnostic_code,
+)
 from models import MarketDataError, MarketSnapshot, Timeframe
 from snapshot import SYMBOLS
 from telegram_notifier import (
@@ -39,6 +49,16 @@ DEFAULT_LOCK_PATH = (
 
 class HourlySnapshotError(ValueError):
     """The collected snapshot cannot safely be delivered automatically."""
+
+    def __init__(
+        self,
+        message: str,
+        code: DiagnosticCode = DiagnosticCode.SERVER_TIME_INVALID,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 class OutsideWindow(HourlySnapshotError):
@@ -67,14 +87,24 @@ def fetch_server_clock(
     started = clock()
     try:
         response = session.get(f"{BASE_URL}/api/v3/time", timeout=(2.0, 3.0))
+    except requests.Timeout:
+        raise HourlySnapshotError(
+            "Binance server time is unavailable.", DiagnosticCode.TIMEOUT
+        ) from None
     except requests.RequestException:
-        raise HourlySnapshotError("Binance server time is unavailable.") from None
+        raise HourlySnapshotError(
+            "Binance server time is unavailable.", DiagnosticCode.CONNECTION_ERROR
+        ) from None
     finished = clock()
     elapsed = finished - started
     if elapsed < timedelta(0) or elapsed > MAX_TIME_REQUEST:
         raise HourlySnapshotError("Binance server time response was delayed.")
     if response.status_code != 200:
-        raise HourlySnapshotError("Binance server time request failed.")
+        raise HourlySnapshotError(
+            "Binance server time request failed.",
+            http_diagnostic_code(response.status_code),
+            response.status_code,
+        )
     try:
         payload = response.json()
     except ValueError:
@@ -107,37 +137,78 @@ def validate_snapshot(snapshot: MarketSnapshot, clock: ServerClock) -> datetime:
     close = eligible_close(clock)
     reference = snapshot.reference_time
     if reference.tzinfo is None or reference.utcoffset() != timedelta(0):
-        raise HourlySnapshotError("Snapshot reference time is invalid.")
+        raise HourlySnapshotError(
+            "Snapshot reference time is invalid.", DiagnosticCode.INVALID_MARKET_DATA
+        )
     if reference > clock.now + clock.uncertainty + MAX_TICKER_FUTURE:
-        raise HourlySnapshotError("Snapshot reference time is in the future.")
+        raise HourlySnapshotError(
+            "Snapshot reference time is in the future.", DiagnosticCode.FRESHNESS_FAILURE
+        )
     if len(snapshot.assets) != len(SYMBOLS) or {asset.symbol for asset in snapshot.assets} != set(
         SYMBOLS
     ):
-        raise HourlySnapshotError("Snapshot does not contain the six required assets.")
+        raise HourlySnapshotError(
+            "Snapshot does not contain the six required assets.", DiagnosticCode.INVALID_MARKET_DATA
+        )
 
     for asset in snapshot.assets:
         if asset.ticker.symbol != asset.symbol:
-            raise HourlySnapshotError("Snapshot ticker symbol does not match its asset.")
+            raise HourlySnapshotError(
+                "Snapshot ticker symbol does not match its asset.",
+                DiagnosticCode.INVALID_MARKET_DATA,
+            )
         if clock.now + clock.uncertainty - asset.ticker.as_of > MAX_TICKER_AGE_AT_SEND:
-            raise HourlySnapshotError("Snapshot live price is stale.")
+            raise HourlySnapshotError(
+                "Snapshot live price is stale.", DiagnosticCode.FRESHNESS_FAILURE
+            )
         if asset.ticker.as_of > clock.now + clock.uncertainty + MAX_TICKER_FUTURE:
-            raise HourlySnapshotError("Snapshot live price timestamp is in the future.")
+            raise HourlySnapshotError(
+                "Snapshot live price timestamp is in the future.",
+                DiagnosticCode.FRESHNESS_FAILURE,
+            )
         for timeframe in (Timeframe.H1, Timeframe.H4):
             series = asset.candles(timeframe)
             if len(series) < MIN_INDICATOR_CANDLES:
-                raise HourlySnapshotError("Snapshot lacks enough closed candles.")
+                raise HourlySnapshotError(
+                    "Snapshot lacks enough closed candles.", DiagnosticCode.INVALID_MARKET_DATA
+                )
             if any(row.symbol != asset.symbol or row.timeframe is not timeframe for row in series):
-                raise HourlySnapshotError("Snapshot candle identity is invalid.")
+                raise HourlySnapshotError(
+                    "Snapshot candle identity is invalid.", DiagnosticCode.INVALID_MARKET_DATA
+                )
             if any(
                 current.open_time != previous.close_time
                 for previous, current in zip(series, series[1:], strict=False)
             ):
-                raise HourlySnapshotError("Snapshot candles are not consecutive.")
+                raise HourlySnapshotError(
+                    "Snapshot candles are not consecutive.", DiagnosticCode.FRESHNESS_FAILURE
+                )
             if series[-1].close_time != expected_cutoff(reference, timeframe):
-                raise HourlySnapshotError("Snapshot closed-candle cutoff is invalid.")
+                raise HourlySnapshotError(
+                    "Snapshot closed-candle cutoff is invalid.", DiagnosticCode.FRESHNESS_FAILURE
+                )
             if timeframe is Timeframe.H1 and series[-1].close_time != close:
                 raise OutsideWindow("Snapshot hourly candle is no longer current.")
     return close
+
+
+Phase = Literal["lock", "initial_clock", "collection", "pre_send_clock", "validation"]
+
+
+def _report_failure(phase: Phase, code: DiagnosticCode, status_code: int | None = None) -> None:
+    """Write only controlled fields; never interpolate an exception or response."""
+    status = (
+        f" status={status_code}"
+        if code is DiagnosticCode.HTTP_OTHER
+        and type(status_code) is int
+        and 100 <= status_code <= 599
+        else ""
+    )
+    print(
+        f"Hourly snapshot unavailable (phase={phase}, reason={code.value}{status}); "
+        "no further send attempt will be made.",
+        file=sys.stderr,
+    )
 
 
 @contextmanager
@@ -165,18 +236,23 @@ def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) ->
     parser = argparse.ArgumentParser(description="Send one eligible hourly Binance snapshot.")
     parser.add_argument("--check", action="store_true", help="validate without sending Telegram")
     arguments = parser.parse_args(argv)
+    phase: Phase = "lock"
     try:
         with hourly_lock(lock_path or DEFAULT_LOCK_PATH) as acquired:
             if not acquired:
                 print("Hourly snapshot skipped: another run is active.")
                 return 0
             with requests.Session() as session:
+                phase = "initial_clock"
                 starting_clock = fetch_server_clock(session)
                 eligible_close(starting_clock)
+                phase = "collection"
                 snapshot = collect_snapshot(BinanceClient(session), SYMBOLS, starting_clock.now)
                 message = format_telegram_snapshot(snapshot)
                 config = None if arguments.check else load_config()
+                phase = "pre_send_clock"
                 final_clock = fetch_server_clock(session)
+                phase = "validation"
                 validate_snapshot(snapshot, final_clock)
             if arguments.check:
                 print("Hourly snapshot is eligible; no message sent.")
@@ -184,15 +260,31 @@ def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) ->
             assert config is not None
             send_message(message, config)
     except OutsideWindow as error:
-        print(f"Hourly snapshot skipped: {error}")
+        message = (
+            "Snapshot hourly candle is no longer current."
+            if str(error) == "Snapshot hourly candle is no longer current."
+            else "No fresh hourly candle is eligible now."
+        )
+        print(f"Hourly snapshot skipped: {message}")
         return 0
+    except HourlySnapshotError as error:
+        _report_failure(phase, error.code, error.status_code)
+        return 1
+    except BinanceRequestError as error:
+        _report_failure(phase, error.code, error.status_code)
+        return 1
+    except FreshnessMarketDataError:
+        _report_failure(phase, DiagnosticCode.FRESHNESS_FAILURE)
+        return 1
+    except (MarketDataError, TelegramSnapshotFormatError):
+        _report_failure(phase, DiagnosticCode.INVALID_MARKET_DATA)
+        return 1
+    except OSError:
+        _report_failure(phase, DiagnosticCode.LOCAL_IO_ERROR)
+        return 1
     except (
-        HourlySnapshotError,
-        MarketDataError,
-        TelegramSnapshotFormatError,
         TelegramConfigError,
         TelegramDeliveryError,
-        OSError,
     ):
         print("Hourly snapshot unavailable; no further send attempt will be made.", file=sys.stderr)
         return 1
