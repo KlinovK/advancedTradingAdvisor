@@ -50,6 +50,8 @@ jobs:
     defaults:
       run:
         working-directory: binance-snapshot
+    env:
+      BINANCE_API_BASE_URL: https://data-api.binance.vision
 
     steps:
       - name: Check out repository
