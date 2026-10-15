@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -199,6 +200,38 @@ def validate_snapshot(snapshot: MarketSnapshot, clock: ServerClock) -> datetime:
 Phase = Literal["lock", "initial_clock", "collection", "pre_send_clock", "validation"]
 
 
+class OutcomeStatus(StrEnum):
+    DELIVERED = "DELIVERED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+class OutcomeReason(StrEnum):
+    TELEGRAM_ACCEPTED = "telegram_accepted"
+    CHECK_ONLY = "check_only"
+    LOCK_CONTENDED = "lock_contended"
+    OUTSIDE_FRESHNESS_WINDOW = "outside_freshness_window"
+    TELEGRAM_CONFIG_FAILURE = "telegram_config_failure"
+    TELEGRAM_DELIVERY_FAILURE = "telegram_delivery_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class RunOutcome:
+    status: OutcomeStatus
+    reason: OutcomeReason | DiagnosticCode
+    phase: Phase | None = None
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.status is OutcomeStatus.FAILED else 0
+
+
+def _report_outcome(outcome: RunOutcome) -> None:
+    """Emit one allowlisted, machine-readable line without exception content."""
+    phase = f" phase={outcome.phase}" if outcome.phase is not None else ""
+    print(f"SNAPSHOT_OUTCOME status={outcome.status.value} reason={outcome.reason.value}{phase}")
+
+
 def _report_failure(phase: Phase, code: DiagnosticCode, status_code: int | None = None) -> None:
     """Write only controlled fields; never interpolate an exception or response."""
     status = (
@@ -236,16 +269,13 @@ def hourly_lock(path: Path) -> Iterator[bool]:
         os.close(descriptor)
 
 
-def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Send one eligible hourly Binance snapshot.")
-    parser.add_argument("--check", action="store_true", help="validate without sending Telegram")
-    arguments = parser.parse_args(argv)
+def _run(*, check: bool, lock_path: Path | None) -> RunOutcome:
     phase: Phase = "lock"
     try:
         with hourly_lock(lock_path or DEFAULT_LOCK_PATH) as acquired:
             if not acquired:
                 print("Hourly snapshot skipped: another run is active.")
-                return 0
+                return RunOutcome(OutcomeStatus.SKIPPED, OutcomeReason.LOCK_CONTENDED, phase)
             with requests.Session() as session:
                 phase = "initial_clock"
                 base_url = resolve_binance_base_url()
@@ -256,14 +286,14 @@ def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) ->
                     BinanceClient(session, base_url=base_url), SYMBOLS, starting_clock.now
                 )
                 message = format_telegram_snapshot(snapshot)
-                config = None if arguments.check else load_config()
+                config = None if check else load_config()
                 phase = "pre_send_clock"
                 final_clock = fetch_server_clock(session, base_url=base_url)
                 phase = "validation"
                 validate_snapshot(snapshot, final_clock)
-            if arguments.check:
+            if check:
                 print("Hourly snapshot is eligible; no message sent.")
-                return 0
+                return RunOutcome(OutcomeStatus.SKIPPED, OutcomeReason.CHECK_ONLY)
             assert config is not None
             send_message(message, config)
     except OutsideWindow as error:
@@ -273,30 +303,39 @@ def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) ->
             else "No fresh hourly candle is eligible now."
         )
         print(f"Hourly snapshot skipped: {message}")
-        return 0
+        return RunOutcome(OutcomeStatus.SKIPPED, OutcomeReason.OUTSIDE_FRESHNESS_WINDOW, phase)
     except HourlySnapshotError as error:
         _report_failure(phase, error.code, error.status_code)
-        return 1
+        return RunOutcome(OutcomeStatus.FAILED, error.code, phase)
     except BinanceRequestError as error:
         _report_failure(phase, error.code, error.status_code)
-        return 1
+        return RunOutcome(OutcomeStatus.FAILED, error.code, phase)
     except FreshnessMarketDataError:
         _report_failure(phase, DiagnosticCode.FRESHNESS_FAILURE)
-        return 1
+        return RunOutcome(OutcomeStatus.FAILED, DiagnosticCode.FRESHNESS_FAILURE, phase)
     except (MarketDataError, TelegramSnapshotFormatError):
         _report_failure(phase, DiagnosticCode.INVALID_MARKET_DATA)
-        return 1
+        return RunOutcome(OutcomeStatus.FAILED, DiagnosticCode.INVALID_MARKET_DATA, phase)
     except OSError:
         _report_failure(phase, DiagnosticCode.LOCAL_IO_ERROR)
-        return 1
-    except (
-        TelegramConfigError,
-        TelegramDeliveryError,
-    ):
+        return RunOutcome(OutcomeStatus.FAILED, DiagnosticCode.LOCAL_IO_ERROR, phase)
+    except TelegramConfigError:
         print("Hourly snapshot unavailable; no further send attempt will be made.", file=sys.stderr)
-        return 1
+        return RunOutcome(OutcomeStatus.FAILED, OutcomeReason.TELEGRAM_CONFIG_FAILURE)
+    except TelegramDeliveryError:
+        print("Hourly snapshot unavailable; no further send attempt will be made.", file=sys.stderr)
+        return RunOutcome(OutcomeStatus.FAILED, OutcomeReason.TELEGRAM_DELIVERY_FAILURE)
     print("Hourly Telegram snapshot delivered.")
-    return 0
+    return RunOutcome(OutcomeStatus.DELIVERED, OutcomeReason.TELEGRAM_ACCEPTED)
+
+
+def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Send one eligible hourly Binance snapshot.")
+    parser.add_argument("--check", action="store_true", help="validate without sending Telegram")
+    arguments = parser.parse_args(argv)
+    outcome = _run(check=arguments.check, lock_path=lock_path)
+    _report_outcome(outcome)
+    return outcome.exit_code
 
 
 if __name__ == "__main__":

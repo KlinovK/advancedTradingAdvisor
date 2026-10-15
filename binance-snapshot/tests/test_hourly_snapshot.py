@@ -24,7 +24,12 @@ from market_data import (
 )
 from models import AssetMarketData, MarketDataError, MarketSnapshot, Ticker, Timeframe
 from snapshot import SYMBOLS
-from telegram_notifier import TelegramConfig, TelegramDeliveryError
+from telegram_notifier import (
+    TelegramConfig,
+    TelegramConfigError,
+    TelegramDeliveryError,
+)
+from telegram_notifier import send_message as send_telegram_message
 
 CLOSE = datetime(2025, 1, 2, 8, tzinfo=UTC)
 REFERENCE = CLOSE + timedelta(minutes=7)
@@ -80,6 +85,18 @@ def runner_mocks(
     return clocks, collector, loader, sender
 
 
+def assert_outcome(
+    output: str,
+    status: str,
+    reason: str,
+    *,
+    phase: str | None = None,
+    human: str = "",
+) -> None:
+    phase_field = f" phase={phase}" if phase is not None else ""
+    assert output == f"{human}SNAPSHOT_OUTCOME status={status} reason={reason}{phase_field}\n"
+
+
 def test_fresh_complete_snapshot_sends_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -97,16 +114,27 @@ def test_fresh_complete_snapshot_sends_once(
     assert "Live prices are ticker values; indicators use closed candles." in message
     assert "1H closed 2025-01-02 08:00 UTC" in message
     assert "4H closed 2025-01-02 08:00 UTC" in message
-    assert capsys.readouterr().out == "Hourly Telegram snapshot delivered.\n"
+    assert_outcome(
+        capsys.readouterr().out,
+        "DELIVERED",
+        "telegram_accepted",
+        human="Hourly Telegram snapshot delivered.\n",
+    )
 
 
 def test_check_validates_without_loading_config_or_sending(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, _, loader, sender = runner_mocks(monkeypatch)
     assert hourly_snapshot.main(["--check"], lock_path=tmp_path / "hourly.lock") == 0
     loader.assert_not_called()
     sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "check_only",
+        human="Hourly snapshot is eligible; no message sent.\n",
+    )
 
 
 @pytest.mark.parametrize("minute,eligible", [(1, False), (2, True), (15, True), (16, False)])
@@ -129,7 +157,10 @@ def test_clock_uncertainty_cannot_cross_fifteen_minute_boundary() -> None:
 
 @pytest.mark.parametrize("minute", [1, 16])
 def test_outside_window_has_no_collection_or_delivery(
-    minute: int, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    minute: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _, collector, loader, sender = runner_mocks(
         monkeypatch, first=CLOSE + timedelta(minutes=minute)
@@ -138,16 +169,30 @@ def test_outside_window_has_no_collection_or_delivery(
     collector.assert_not_called()
     loader.assert_not_called()
     sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "outside_freshness_window",
+        phase="initial_clock",
+        human="Hourly snapshot skipped: No fresh hourly candle is eligible now.\n",
+    )
 
 
 def test_delayed_final_check_after_sleep_skips_delivery(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     clocks, collector, _, sender = runner_mocks(monkeypatch, final=CLOSE + timedelta(minutes=31))
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
     assert clocks.call_count == 2
     collector.assert_called_once()
     sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "outside_freshness_window",
+        phase="validation",
+        human="Hourly snapshot skipped: No fresh hourly candle is eligible now.\n",
+    )
 
 
 def test_missing_asset_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -226,8 +271,54 @@ def test_telegram_failure_is_one_attempt_and_redacted(
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
     sender.assert_called_once()
     output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "telegram_delivery_failure")
+    assert output.err == "Hourly snapshot unavailable; no further send attempt will be made.\n"
     assert CONFIG.bot_token not in output.out + output.err
     assert "secret response" not in output.out + output.err
+
+
+def test_telegram_configuration_failure_has_one_safe_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, loader, sender = runner_mocks(monkeypatch)
+    loader.side_effect = TelegramConfigError("secret configuration value")
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
+    output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "telegram_config_failure")
+    assert output.err == "Hourly snapshot unavailable; no further send attempt will be made.\n"
+    assert "secret" not in output.out + output.err
+    sender.assert_not_called()
+
+
+@pytest.mark.parametrize("delivery_failure", ["rejected", "timeout"])
+def test_telegram_rejection_or_ambiguous_timeout_is_failed_without_retry(
+    delivery_failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner_mocks(monkeypatch)
+    session = Mock()
+    if delivery_failure == "timeout":
+        session.post.side_effect = requests.Timeout("secret token and response body")
+    else:
+        session.post.return_value.status_code = 403
+    monkeypatch.setattr(
+        hourly_snapshot,
+        "send_message",
+        lambda message, config: send_telegram_message(message, config, session=session),
+    )
+
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
+    output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "telegram_delivery_failure")
+    assert output.err == "Hourly snapshot unavailable; no further send attempt will be made.\n"
+    assert CONFIG.bot_token not in output.out + output.err
+    assert CONFIG.chat_id not in output.out + output.err
+    assert "secret" not in output.out + output.err
+    session.post.assert_called_once()
 
 
 def test_clock_failure_prevents_collection_and_delivery(
@@ -314,13 +405,22 @@ def test_server_clock_rejects_delayed_response_and_skew() -> None:
 
 
 def test_interprocess_lock_skips_concurrent_run_and_recovers(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _, collector, _, sender = runner_mocks(monkeypatch)
     lock = tmp_path / "hourly.lock"
     with hourly_snapshot.hourly_lock(lock) as acquired:
         assert acquired
         assert hourly_snapshot.main([], lock_path=lock) == 0
+        assert_outcome(
+            capsys.readouterr().out,
+            "SKIPPED",
+            "lock_contended",
+            phase="lock",
+            human="Hourly snapshot skipped: another run is active.\n",
+        )
         collector.assert_not_called()
         sender.assert_not_called()
         child = subprocess.run(
@@ -439,7 +539,7 @@ def test_clock_failure_reports_phase_without_secrets_or_send(
     clocks.side_effect = values
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
     output = capsys.readouterr()
-    assert output.out == ""
+    assert_outcome(output.out, "FAILED", "http_451", phase=phase)
     assert output.err == (
         f"Hourly snapshot unavailable (phase={phase}, reason=http_451); "
         "no further send attempt will be made.\n"
@@ -480,7 +580,7 @@ def test_collection_diagnostics_are_allowlisted_and_prevent_delivery(
     collector.side_effect = error
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
     output = capsys.readouterr()
-    assert output.out == ""
+    assert_outcome(output.out, "FAILED", reason, phase="collection")
     assert output.err == (
         f"Hourly snapshot unavailable (phase=collection, reason={reason}{status}); "
         "no further send attempt will be made.\n"
@@ -506,7 +606,9 @@ def test_validation_freshness_diagnostic_prevents_delivery(
     snapshot = replace_asset(snapshot, 0, replace(asset, ticker=replace(asset.ticker, as_of=CLOSE)))
     _, _, _, sender = runner_mocks(monkeypatch, snapshot=snapshot)
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
-    assert "phase=validation, reason=freshness_failure" in capsys.readouterr().err
+    output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "freshness_failure", phase="validation")
+    assert "phase=validation, reason=freshness_failure" in output.err
     sender.assert_not_called()
 
 
@@ -519,7 +621,9 @@ def test_local_lock_io_error_is_safe_and_prevents_delivery(
     occupied = tmp_path / "occupied"
     occupied.write_text("not a directory")
     assert hourly_snapshot.main([], lock_path=occupied / "hourly.lock") == 1
-    assert capsys.readouterr().err == (
+    output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "local_io_error", phase="lock")
+    assert output.err == (
         "Hourly snapshot unavailable (phase=lock, reason=local_io_error); "
         "no further send attempt will be made.\n"
     )
@@ -534,8 +638,12 @@ def test_expected_skip_output_is_preserved(
 ) -> None:
     _, collector, _, sender = runner_mocks(monkeypatch, first=CLOSE + timedelta(minutes=1))
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
-    assert capsys.readouterr().out == (
-        "Hourly snapshot skipped: No fresh hourly candle is eligible now.\n"
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "outside_freshness_window",
+        phase="initial_clock",
+        human="Hourly snapshot skipped: No fresh hourly candle is eligible now.\n",
     )
     collector.assert_not_called()
     sender.assert_not_called()
@@ -554,7 +662,13 @@ def test_skip_never_prints_an_unexpected_exception_message(
     )
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
     output = capsys.readouterr()
-    assert output.out == "Hourly snapshot skipped: No fresh hourly candle is eligible now.\n"
+    assert_outcome(
+        output.out,
+        "SKIPPED",
+        "outside_freshness_window",
+        phase="initial_clock",
+        human="Hourly snapshot skipped: No fresh hourly candle is eligible now.\n",
+    )
     assert "secret" not in output.out + output.err
     collector.assert_not_called()
     sender.assert_not_called()
@@ -602,7 +716,7 @@ def test_invalid_endpoint_prevents_all_requests_and_telegram_delivery(
     clocks, collector, loader, sender = runner_mocks(monkeypatch)
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
     output = capsys.readouterr()
-    assert output.out == ""
+    assert_outcome(output.out, "FAILED", "invalid_market_data", phase="initial_clock")
     assert output.err == (
         "Hourly snapshot unavailable (phase=initial_clock, reason=invalid_market_data); "
         "no further send attempt will be made.\n"
@@ -627,7 +741,9 @@ def test_http_451_from_selected_clock_endpoint_prevents_telegram_delivery(
     session.get.return_value.status_code = 451
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
     session.get.assert_called_once_with(f"{MARKET_DATA_BASE_URL}/api/v3/time", timeout=(2.0, 3.0))
-    assert capsys.readouterr().err == (
+    output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "http_451", phase="initial_clock")
+    assert output.err == (
         "Hourly snapshot unavailable (phase=initial_clock, reason=http_451); "
         "no further send attempt will be made.\n"
     )

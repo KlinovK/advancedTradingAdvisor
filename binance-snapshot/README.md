@@ -129,6 +129,11 @@ credentials, Telegram response bodies, or token-bearing URLs. If it fails,
 verify the project `.venv`, the installed plist paths, network access, and the
 local `.env` values without posting those values into logs or support requests.
 If it skips, check the run time relative to the latest UTC hourly close.
+Each handled invocation also writes one `SNAPSHOT_OUTCOME` line with a fixed
+`status` and `reason`, plus a `phase` where applicable. `DELIVERED` means the
+Telegram API accepted the message, not that it reached or was read on a device.
+`SKIPPED` means no Telegram POST was attempted; `FAILED` includes uncertain
+delivery such as a Telegram timeout.
 
 To remove the agent after installation:
 
@@ -170,7 +175,8 @@ duplicate messages. An active macOS LaunchAgent is outside that GitHub
 concurrency group and could also send the same candle; use only one automated
 delivery source. There is no persistent deduplication or automatic Telegram
 retry. Monitor actual delivery outcomes because a freshness skip exits
-successfully.
+successfully; the `SNAPSHOT_OUTCOME` line distinguishes it from delivery in
+GitHub Actions logs.
 
 If scheduling is activated later and must be rolled back, disable **Binance
 hourly scheduled delivery** in the repository's GitHub Actions page to stop
