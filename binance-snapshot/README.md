@@ -151,19 +151,20 @@ retry. Read-only Binance GETs have at most two attempts under an overall deadlin
 Sleep after the final freshness check or an uncertain Telegram response can still
 affect delivery timing. No automatic trading occurs.
 
-## Proposed GitHub Actions hourly delivery (disabled)
+## GitHub Actions hourly delivery
 
-`.github/workflows/binance-hourly-scheduled.yml` prepares a lightweight,
-separate delivery job. It installs runtime dependencies and would run
-`python hourly_snapshot.py` using `https://data-api.binance.vision`. Offline
+After publication to `main`, `.github/workflows/binance-hourly-scheduled.yml`
+runs a lightweight delivery job at HH:05 UTC each hour. It installs runtime
+dependencies and runs `python hourly_snapshot.py` using
+`https://data-api.binance.vision`. Offline
 tests stay in the existing validation workflow, so they do not delay the
-scheduled attempt. Component tests and Ruff must pass before publishing a
-future delivery change.
+scheduled attempt.
 
-**Scheduling is not active.** The new workflow has only `workflow_dispatch`,
-and its delivery job has a static `if: ${{ false }}` gate. The proposed future
-schedule, `5 * * * *` (HH:05 UTC), is a comment only. A separate reviewed change
-must add the schedule and remove the gate before it can send anything.
+**Scheduling is active after this change is published.** The workflow has one
+schedule, `5 * * * *`, and also supports `workflow_dispatch`; its delivery job
+runs only for the `schedule` event. Manually dispatching this scheduled workflow
+does not send a message. The separate Binance snapshot validation workflow
+remains the manual delivery path.
 
 GitHub may start scheduled workflows late or omit a run. The runner checks
 Binance server time and accepts a fully closed 1H candle only 2–15 minutes
@@ -176,10 +177,15 @@ concurrency group and could also send the same candle; use only one automated
 delivery source. There is no persistent deduplication or automatic Telegram
 retry. Monitor actual delivery outcomes because a freshness skip exits
 successfully; the `SNAPSHOT_OUTCOME` line distinguishes it from delivery in
-GitHub Actions logs.
+GitHub Actions logs. To inspect a run, open **Actions → Binance hourly scheduled
+delivery → run → deliver → Deliver eligible hourly snapshot** and look for
+`SNAPSHOT_OUTCOME status=DELIVERED`, `SKIPPED`, or `FAILED`. A green job can have
+`SKIPPED` when no Telegram POST was attempted.
 
-If scheduling is activated later and must be rolled back, disable **Binance
-hourly scheduled delivery** in the repository's GitHub Actions page to stop
-new runs, inspect any queued or running run before retrying a message, and
-revert the activation change that added the cron and removed the static gate.
-The existing manual delivery workflow remains independent.
+To stop new automatic runs immediately, disable **Binance hourly scheduled
+delivery** in the repository's GitHub Actions page or run
+`gh workflow disable binance-hourly-scheduled.yml`. Inspect any queued or
+running runs and cancel them if necessary; disabling the workflow does not
+establish whether an already-running delivery step completed. For a code-level
+rollback, remove the schedule and restore `if: ${{ false }}`. The existing
+manual delivery workflow remains independent.

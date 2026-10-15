@@ -2,16 +2,15 @@ name: Binance hourly scheduled delivery
 
 on:
   workflow_dispatch:
-  # Future schedule, disabled until separately reviewed:
-  # schedule:
-  #   - cron: "5 * * * *"  # HH:05 UTC
+  schedule:
+    - cron: "5 * * * *"  # HH:05 UTC
 
 permissions:
   contents: read
 
 jobs:
   deliver:
-    if: ${{ false }}
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
