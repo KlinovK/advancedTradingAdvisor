@@ -36,7 +36,7 @@ from telegram_notifier import (
 from telegram_snapshot_formatter import TelegramSnapshotFormatError, format_telegram_snapshot
 
 MIN_AGE = timedelta(minutes=2)
-MAX_AGE = timedelta(minutes=15)
+MAX_AGE = timedelta(minutes=45)
 MAX_TIME_REQUEST = timedelta(seconds=5)
 MAX_LOCAL_SKEW = timedelta(seconds=30)
 MAX_TICKER_AGE_AT_SEND = timedelta(minutes=5)

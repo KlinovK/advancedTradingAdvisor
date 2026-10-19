@@ -43,17 +43,17 @@ def series(symbol: str, timeframe: Timeframe, count: int = 60) -> tuple:
     )
 
 
-def complete_snapshot() -> MarketSnapshot:
+def complete_snapshot(reference: datetime = REFERENCE) -> MarketSnapshot:
     assets = tuple(
         AssetMarketData(
             symbol,
-            Ticker(symbol, Decimal(100), Decimal(110), Decimal(90), REFERENCE),
+            Ticker(symbol, Decimal(100), Decimal(110), Decimal(90), reference),
             series(symbol, Timeframe.H1),
             series(symbol, Timeframe.H4),
         )
         for symbol in SYMBOLS
     )
-    return MarketSnapshot(REFERENCE, assets)
+    return MarketSnapshot(reference, assets)
 
 
 def replace_asset(snapshot: MarketSnapshot, index: int, asset: AssetMarketData) -> MarketSnapshot:
@@ -137,7 +137,10 @@ def test_check_validates_without_loading_config_or_sending(
     )
 
 
-@pytest.mark.parametrize("minute,eligible", [(1, False), (2, True), (15, True), (16, False)])
+@pytest.mark.parametrize(
+    ("minute", "eligible"),
+    [(1, False), (2, True), (15, True), (25, True), (40, True), (45, True), (46, False)],
+)
 def test_eligibility_boundaries(minute: int, eligible: bool) -> None:
     clock = hourly_snapshot.ServerClock(CLOSE + timedelta(minutes=minute))
     if eligible:
@@ -147,15 +150,15 @@ def test_eligibility_boundaries(minute: int, eligible: bool) -> None:
             hourly_snapshot.eligible_close(clock)
 
 
-def test_clock_uncertainty_cannot_cross_fifteen_minute_boundary() -> None:
+def test_clock_uncertainty_cannot_cross_forty_five_minute_boundary() -> None:
     clock = hourly_snapshot.ServerClock(
-        CLOSE + timedelta(minutes=14, seconds=59), timedelta(seconds=2)
+        CLOSE + timedelta(minutes=44, seconds=59), timedelta(seconds=2)
     )
     with pytest.raises(hourly_snapshot.OutsideWindow):
         hourly_snapshot.eligible_close(clock)
 
 
-@pytest.mark.parametrize("minute", [1, 16])
+@pytest.mark.parametrize("minute", [1, 46])
 def test_outside_window_has_no_collection_or_delivery(
     minute: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -178,10 +181,42 @@ def test_outside_window_has_no_collection_or_delivery(
     )
 
 
+@pytest.mark.parametrize("minute", [25, 40, 45])
+def test_later_in_hour_still_sends_fresh_aligned_snapshot_once(
+    minute: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=minute)
+    clocks, collector, _, sender = runner_mocks(
+        monkeypatch, snapshot=complete_snapshot(observed_at), first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
+    assert clocks.call_count == 2
+    collector.assert_called_once()
+    sender.assert_called_once()
+
+
+def test_pre_send_check_accepts_forty_five_minute_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    final = CLOSE + timedelta(minutes=45)
+    clocks, collector, _, sender = runner_mocks(
+        monkeypatch,
+        snapshot=complete_snapshot(final),
+        first=CLOSE + timedelta(minutes=40),
+        final=final,
+    )
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
+    assert clocks.call_count == 2
+    collector.assert_called_once()
+    sender.assert_called_once()
+
+
 def test_delayed_final_check_after_sleep_skips_delivery(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    clocks, collector, _, sender = runner_mocks(monkeypatch, final=CLOSE + timedelta(minutes=31))
+    clocks, collector, _, sender = runner_mocks(monkeypatch, final=CLOSE + timedelta(minutes=46))
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 0
     assert clocks.call_count == 2
     collector.assert_called_once()
@@ -261,6 +296,58 @@ def test_stale_live_price_rejected_before_send(
     _, _, _, sender = runner_mocks(monkeypatch, snapshot=snapshot)
     assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
     sender.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("invalid_field", "reason"),
+    [
+        ("stale_ticker", "freshness_failure"),
+        ("future_ticker", "freshness_failure"),
+        ("future_reference", "freshness_failure"),
+        ("misaligned_1h", "freshness_failure"),
+        ("misaligned_4h", "freshness_failure"),
+    ],
+)
+def test_later_window_still_rejects_invalid_market_timestamps(
+    invalid_field: str,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=40)
+    snapshot = complete_snapshot(observed_at)
+    asset = snapshot.assets[0]
+    if invalid_field == "stale_ticker":
+        asset = replace(
+            asset, ticker=replace(asset.ticker, as_of=observed_at - timedelta(minutes=6))
+        )
+    elif invalid_field == "future_ticker":
+        asset = replace(
+            asset, ticker=replace(asset.ticker, as_of=observed_at + timedelta(seconds=11))
+        )
+    elif invalid_field == "future_reference":
+        snapshot = replace(snapshot, reference_time=observed_at + timedelta(seconds=11))
+    else:
+        timeframe = Timeframe.H1 if invalid_field == "misaligned_1h" else Timeframe.H4
+        shifted = tuple(
+            replace(
+                row,
+                open_time=row.open_time - timeframe.duration,
+                close_time=row.close_time - timeframe.duration,
+            )
+            for row in asset.candles(timeframe)
+        )
+        asset = replace(asset, **{"hourly" if timeframe is Timeframe.H1 else "four_hour": shifted})
+    snapshot = replace_asset(snapshot, 0, asset)
+    clocks, collector, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock") == 1
+    assert clocks.call_count == 2
+    collector.assert_called_once()
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", reason, phase="validation")
 
 
 def test_telegram_failure_is_one_attempt_and_redacted(

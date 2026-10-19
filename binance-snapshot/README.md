@@ -72,7 +72,7 @@ hourly runner below.
 `MarketSnapshot`, Telegram formatter, and notifier. At most one message is attempted
 per invocation. It checks the public Binance Spot server clock before collection
 and again immediately before delivery. The fully closed, common 1H candle must be
-the latest expected candle and be 2–15 minutes old. All six assets must have
+the latest expected candle and be 2–45 minutes old. All six assets must have
 aligned closed 1H and 4H candles, enough candles for EMA50, and fresh ticker
 prices. If a scheduled run wakes late, falls outside the window, or overlaps
 another run, it skips sending. An invalid or incomplete snapshot fails without
@@ -112,7 +112,7 @@ has neither `RunAtLoad` nor `KeepAlive`. The computer must be running; this
 configuration does not wake it. Apple's `StartCalendarInterval` can start a
 missed run when the Mac wakes from sleep (missed sleep events are coalesced).
 The freshness gate rejects that delayed run if the latest hourly candle is
-outside its 2–15 minute window. Hours missed while the Mac is powered off are
+outside its 2–45 minute window. Hours missed while the Mac is powered off are
 not replayed. Local clock changes and time zone changes can affect the
 scheduled minute; the Binance clock and UTC candle checks determine eligibility.
 
@@ -160,14 +160,15 @@ dependencies and runs `python hourly_snapshot.py` using
 tests stay in the existing validation workflow, so they do not delay the
 scheduled attempt.
 
-**Scheduling is active after this change is published.** The workflow has one
-schedule, `5 * * * *`, and also supports `workflow_dispatch`; its delivery job
-runs only for the `schedule` event. Manually dispatching this scheduled workflow
+The workflow has one configured schedule, `5 * * * *`; whether it runs depends
+on its current enabled state in GitHub Actions. It also supports
+`workflow_dispatch`, but its delivery job runs only for the `schedule` event.
+Manually dispatching this scheduled workflow
 does not send a message. The separate Binance snapshot validation workflow
 remains the manual delivery path.
 
 GitHub may start scheduled workflows late or omit a run. The runner checks
-Binance server time and accepts a fully closed 1H candle only 2–15 minutes
+Binance server time and accepts a fully closed 1H candle only 2–45 minutes
 after its close; a late start or a run that crosses the deadline skips safely.
 This is best-effort hourly delivery, not a guarantee that every hour produces
 a message. The scheduled and manual delivery jobs share a GitHub concurrency
