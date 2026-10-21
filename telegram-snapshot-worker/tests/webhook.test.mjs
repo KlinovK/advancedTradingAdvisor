@@ -170,15 +170,12 @@ for (const update of [
   });
 }
 
-test("configured large ID does not match a rounded JSON number", async () => {
+test("configured ID above Telegram's private-user range fails closed", async () => {
   const rig = testRig({
     env: { ALLOWED_TELEGRAM_USER_ID: "9007199254740993" },
   });
   const result = await rig.webhook();
-  assert.deepEqual(result.body, {
-    status: "ignored",
-    reason: "unauthorized_user",
-  });
+  assert.deepEqual(result, { code: 503, body: { status: "unavailable" } });
   assert.equal(rig.calls.length, 0);
 });
 

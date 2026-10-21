@@ -46,27 +46,107 @@ does not implement cross-run candle deduplication.
 
 ## Configuration
 
-`wrangler.jsonc` contains only nonsecret values. Replace the two `REPLACE_...`
-Telegram ID placeholders with the intended decimal IDs **before any later
-deployment**. The fixed GitHub owner, repository, workflow, ref and 600-second
-cooldown are validated by the code; changing them requires a reviewed code
-change. The Durable Object binding and SQLite migration are in the same file.
-`workers_dev` is disabled and no route is configured, so this template cannot
-receive public webhooks as-is.
+`wrangler.jsonc` contains only nonsecret values. The fixed GitHub owner,
+repository, workflow, ref and 600-second cooldown are validated by the code;
+changing them requires a reviewed code change. The `SNAPSHOT_COORDINATOR`
+Durable Object binding and SQLite migration `v1` are in the same file.
+`workers_dev` and `preview_urls` are explicitly disabled, and `routes` is
+empty. There is no configured public webhook URL. Confirm these settings in
+the Cloudflare account before and after any future deployment; the local file
+alone cannot prove that an existing Worker has no older route or custom domain.
+
+The four required Worker secrets are declared by name in `secrets.required`:
+
+- `TELEGRAM_WEBHOOK_SECRET` — the random token that must match Telegram's
+  `setWebhook` secret-token setting. Use Telegram's allowed characters.
+- `GITHUB_DISPATCH_TOKEN` — a short-lived, fine-grained credential restricted
+  to this repository with Actions write permission.
+- `ALLOWED_TELEGRAM_USER_ID` — the authorized Telegram user's decimal ID.
+- `ALLOWED_TELEGRAM_CHAT_ID` — the authorized private chat's decimal ID.
+
+The two IDs are also secrets: they are not in tracked Wrangler variables.
+Both must be canonical positive decimal private user-dialog IDs in the range
+`1` through `1099511627775`, as documented for [Telegram user dialog IDs](https://core.telegram.org/api/bots/ids).
+The Worker returns an unavailable response without dispatching if any required
+binding is missing, malformed, or outside that range. Wrangler validates
+declared secret names during deployment; the Worker validates their values at
+request time.
 
 For a future local development environment, copy `.dev.vars.example` to
-`.dev.vars` and fill it privately. `.dev.vars` is ignored by Git. For a future
-Cloudflare deployment, provision Worker secrets named:
+`.dev.vars` and replace **all four dummy values** with private local test
+values. `.dev.vars`, `.env`, and their variants are ignored by Git. Use either
+`.dev.vars` or `.env` for local Wrangler development, not both. The example's
+ID placeholders are intentionally invalid, so a copied example fails closed
+until they are replaced. Offline tests use separate dummy credentials and
+mocked network calls. Never put real values in
+`wrangler.jsonc`, Git, logs, command-line arguments, or this README.
 
-- `TELEGRAM_WEBHOOK_SECRET` — the same random secret configured in Telegram's
-  `setWebhook` secret-token setting. Use Telegram's allowed characters.
-- `GITHUB_DISPATCH_TOKEN` — a fine-grained credential restricted to this
-  repository with Actions write permission, limited lifetime and appropriate
-  rotation procedures.
+## Controlled deployment plan (not executed)
 
-Never put secret values in `wrangler.jsonc`, Git, logs, or command-line
-arguments. Route and webhook setup, secret creation, publication of the TG
-workflow and Worker deployment are separate, reviewed activation steps.
+Deployment and webhook activation require separate reviews and approvals:
+
+1. Verify the intended Cloudflare account identity, permissions, plan quotas,
+   and access to SQLite-backed Durable Objects. Confirm the authorized account
+   is the one associated with the intended future route.
+2. Check whether `telegram-snapshot-dispatcher` already exists in that account.
+   If it does, establish ownership and inspect its current routes, custom
+   domains, `workers.dev` setting, preview/version URL setting, all existing
+   secret binding names, other bindings, and deployments. **Stop** if deploying
+   would overwrite an unreviewed Worker or retain unexpected bindings.
+3. Review `wrangler.jsonc` and the exact bundled artifact from the dry run.
+   Confirm `workers_dev: false`, `preview_urls: false`, `routes: []`, the fixed
+   GitHub target, the `SNAPSHOT_COORDINATOR` binding, and SQLite migration `v1`.
+   Confirm that no pre-existing route or custom domain would remain attached.
+4. Create a private temporary directory **outside the repository** and outside
+   synced or backed-up folders. Set `umask 077`; use `mktemp -d` and verify the
+   directory is owner-only (`0700`). Prepare the four real values in a `.env`
+   or JSON secrets file there, using a trusted editor or secret manager that
+   does not leave backup or swap copies. Verify the file is owner-only (`0600`).
+   The two allowed IDs must be the intended decimal Telegram IDs. Do not use
+   `.dev.vars.example` values. Never type secret values into shell commands or
+   arguments, and never print or log them. Passing only the private file path
+   to Wrangler avoids putting the values in shell history.
+5. With no Telegram webhook configured and no public route, provision all four
+   bindings **together with the reviewed code** using the installed Wrangler's
+   `deploy --secrets-file <private absolute path>` option. First recheck the
+   target account and Worker ownership. Review the complete intended binding
+   set, including any pre-existing names: secrets omitted from `--secrets-file`
+   may remain bound after deployment. Do not use four separate
+   `wrangler secret put` commands: each can immediately deploy a new version,
+   potentially exposing a partially configured Worker if a route already
+   exists. The `secrets.required` declaration makes missing names a deploy
+   error; the request handler still fails closed on invalid values.
+6. Verify in Cloudflare that all four binding **names** exist, the Durable
+   Object and migration are present, and there is no `workers.dev`, preview
+   or version URL, route, or custom domain exposing this Worker. Do not print
+   or retrieve secret values. After successful provisioning and verification,
+   delete the temporary secrets file and directory. Deleting a file does not
+   guarantee erasure from SSD layers, snapshots, or backups; avoid those
+   locations and rotate credentials if exposure is suspected. Stop before
+   attaching any route or configuring Telegram's webhook.
+
+Cloudflare ownership, quotas, existing routes, and deployment state cannot be
+verified by offline tests. A dry run does not create or activate a Worker.
+
+### Separate webhook activation gates
+
+Before any future webhook activation, verify bot ownership and inspect the
+existing Telegram webhook and any polling consumers. Confirm the allowed
+user/chat IDs, HTTPS route ownership, and matching webhook secret. Decide how
+pending Telegram updates should be handled. Obtain explicit activation
+approval, perform one controlled test, and correlate the dispatch response,
+GitHub run, `SNAPSHOT_OUTCOME`, and resulting Telegram delivery. Do not infer
+delivery from a GitHub HTTP 204 response.
+
+### Rollback plan
+
+Remove or restore the Telegram webhook first to stop new commands, then remove
+the Worker's public route. Revoke the GitHub dispatch credential and disable
+only the on-demand GitHub workflow if dispatch must also stop. Leave the
+independent scheduled hourly workflow untouched. Durable Object reservations
+and cooldown state persist after routing changes; reverting code does not
+automatically roll back SQLite migrations or erase state. Review migration
+compatibility before restoring an earlier Worker version.
 
 ## Offline verification
 
@@ -103,5 +183,5 @@ GitHub or Binance. Python component tests run separately from
   replace a pending scheduled job. The two jobs can send concurrently or send
   snapshots for the same candle. GitHub concurrency is not durable candle
   deduplication; the Worker limits only commands reaching this Durable Object.
-- A Worker deployment requires a separately reviewed HTTPS route, Telegram
-  webhook configuration, real allowed IDs and Worker secrets. None is active.
+- A usable public webhook requires a separately reviewed HTTPS route and
+  Telegram webhook configuration. Neither is configured by this repository.

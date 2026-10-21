@@ -5,6 +5,8 @@ export const MAX_BODY_BYTES = 8_192;
 export const MAX_MESSAGE_AGE_MS = 120_000;
 export const MAX_FUTURE_SKEW_MS = 30_000;
 const SECRET_BYTES = 256;
+// Telegram private chats use positive user dialog IDs (1..0xffffffffff).
+const MAX_PRIVATE_TELEGRAM_ID = 0xffffffffffn;
 const textEncoder = new TextEncoder();
 
 export type UpdateDecision =
@@ -41,13 +43,12 @@ export function classifyMessageAge(
   return null;
 }
 
-function configuredId(value: string): bigint | null {
-  if (!/^-?[0-9]+$/.test(value)) return null;
-  try {
-    return BigInt(value);
-  } catch {
+function configuredId(value: unknown): bigint | null {
+  if (typeof value !== "string" || !/^[1-9][0-9]{0,12}$/.test(value)) {
     return null;
   }
+  const id = BigInt(value);
+  return id <= MAX_PRIVATE_TELEGRAM_ID ? id : null;
 }
 
 export function validConfig(env: Env): boolean {

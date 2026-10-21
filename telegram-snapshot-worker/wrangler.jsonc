@@ -3,14 +3,21 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-20",
   "workers_dev": false,
+  "preview_urls": false,
   "routes": [],
   "vars": {
     "GITHUB_OWNER": "KlinovK",
     "GITHUB_REPOSITORY": "advancedTradingAdvisor",
     "GITHUB_WORKFLOW": "binance-on-demand-snapshot.yml",
-    "ALLOWED_TELEGRAM_USER_ID": "REPLACE_WITH_USER_ID",
-    "ALLOWED_TELEGRAM_CHAT_ID": "REPLACE_WITH_CHAT_ID",
     "COOLDOWN_SECONDS": "600",
+  },
+  "secrets": {
+    "required": [
+      "TELEGRAM_WEBHOOK_SECRET",
+      "GITHUB_DISPATCH_TOKEN",
+      "ALLOWED_TELEGRAM_USER_ID",
+      "ALLOWED_TELEGRAM_CHAT_ID",
+    ],
   },
   "durable_objects": {
     "bindings": [
