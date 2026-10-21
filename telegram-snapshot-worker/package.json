@@ -1,0 +1,20 @@
+{
+  "name": "telegram-snapshot-worker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs",
+    "format:check": "prettier --check src tests package.json tsconfig.json wrangler.jsonc",
+    "runtime:check": "node tests/runtime-check.mjs",
+    "config:check": "wrangler deploy --dry-run --outdir /tmp/telegram-snapshot-worker-dry-run"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.0.0"
+  }
+}

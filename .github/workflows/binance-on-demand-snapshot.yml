@@ -1,0 +1,55 @@
+name: Binance on-demand snapshot delivery
+
+on:
+  workflow_dispatch:
+    inputs:
+      requested_at_utc:
+        description: "UTC command time (YYYY-MM-DDTHH:MM:SSZ)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deliver:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Keep on-demand requests from replacing pending scheduled delivery jobs.
+    concurrency:
+      group: binance-snapshot-telegram-on-demand
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: binance-snapshot
+    env:
+      BINANCE_API_BASE_URL: https://data-api.binance.vision
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate request age
+        id: request_guard
+        env:
+          REQUESTED_AT_UTC: ${{ inputs.requested_at_utc }}
+        run: python validate_dispatch_request.py
+
+      - name: Deliver on-demand snapshot
+        if: ${{ steps.request_guard.outputs.should_run == 'true' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BINANCE_SNAPSHOT_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.BINANCE_SNAPSHOT_TELEGRAM_CHAT_ID }}
+        run: python hourly_snapshot.py --mode on-demand

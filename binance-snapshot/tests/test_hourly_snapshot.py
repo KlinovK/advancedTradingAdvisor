@@ -21,6 +21,7 @@ from market_data import (
     BinanceRequestError,
     DiagnosticCode,
     FreshnessMarketDataError,
+    expected_cutoff,
 )
 from models import AssetMarketData, MarketDataError, MarketSnapshot, Ticker, Timeframe
 from snapshot import SYMBOLS
@@ -30,26 +31,37 @@ from telegram_notifier import (
     TelegramDeliveryError,
 )
 from telegram_notifier import send_message as send_telegram_message
+from telegram_snapshot_formatter import format_telegram_snapshot
 
 CLOSE = datetime(2025, 1, 2, 8, tzinfo=UTC)
 REFERENCE = CLOSE + timedelta(minutes=7)
 CONFIG = TelegramConfig("123456:FAKE_test-token", "-1001234567890")
+BOUNDARY_SKIP_HUMAN = (
+    "Hourly snapshot skipped: latest closed candle boundary changed or is uncertain.\n"
+)
 
 
-def series(symbol: str, timeframe: Timeframe, count: int = 60) -> tuple:
+def series(
+    symbol: str, timeframe: Timeframe, count: int = 60, *, close_time: datetime = CLOSE
+) -> tuple:
     return tuple(
-        candle(symbol, timeframe, CLOSE - (count - index) * timeframe.duration)
+        candle(symbol, timeframe, close_time - (count - index) * timeframe.duration)
         for index in range(count)
     )
 
 
-def complete_snapshot(reference: datetime = REFERENCE) -> MarketSnapshot:
+def complete_snapshot(
+    reference: datetime = REFERENCE,
+    *,
+    hourly_close: datetime = CLOSE,
+    four_hour_close: datetime = CLOSE,
+) -> MarketSnapshot:
     assets = tuple(
         AssetMarketData(
             symbol,
             Ticker(symbol, Decimal(100), Decimal(110), Decimal(90), reference),
-            series(symbol, Timeframe.H1),
-            series(symbol, Timeframe.H4),
+            series(symbol, Timeframe.H1, close_time=hourly_close),
+            series(symbol, Timeframe.H4, close_time=four_hour_close),
         )
         for symbol in SYMBOLS
     )
@@ -135,6 +147,531 @@ def test_check_validates_without_loading_config_or_sending(
         "check_only",
         human="Hourly snapshot is eligible; no message sent.\n",
     )
+
+
+def test_explicit_scheduled_mode_matches_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, _, _, sender = runner_mocks(monkeypatch)
+    assert hourly_snapshot.main([], lock_path=tmp_path / "default.lock") == 0
+    default_output = capsys.readouterr()
+    default_message = sender.call_args.args[0]
+    _, _, _, sender = runner_mocks(monkeypatch)
+    assert hourly_snapshot.main(["--mode", "scheduled"], lock_path=tmp_path / "explicit.lock") == 0
+    assert capsys.readouterr() == default_output
+    sender.assert_called_once()
+    assert sender.call_args.args[0] == default_message
+
+
+def test_explicit_scheduled_mode_keeps_forty_five_minute_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, collector, loader, sender = runner_mocks(monkeypatch, first=CLOSE + timedelta(minutes=46))
+    assert hourly_snapshot.main(["--mode", "scheduled"], lock_path=tmp_path / "hourly.lock") == 0
+    collector.assert_not_called()
+    loader.assert_not_called()
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "outside_freshness_window",
+        phase="initial_clock",
+        human="Hourly snapshot skipped: No fresh hourly candle is eligible now.\n",
+    )
+
+
+@pytest.mark.parametrize("minute", [1, 46, 50, 59])
+def test_on_demand_sends_latest_closed_snapshot_outside_scheduled_window(
+    minute: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=minute)
+    snapshot = complete_snapshot(observed_at)
+    clocks, collector, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 0
+    assert clocks.call_count == 2
+    collector.assert_called_once()
+    assert collector.call_args.args[2] == observed_at
+    sender.assert_called_once_with(format_telegram_snapshot(snapshot), CONFIG)
+    assert_outcome(
+        capsys.readouterr().out,
+        "DELIVERED",
+        "telegram_accepted",
+        human="Hourly Telegram snapshot delivered.\n",
+    )
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "hourly_close", "four_hour_close", "should_send"),
+    [
+        (
+            datetime(2025, 1, 2, 7, 59, 59, tzinfo=UTC),
+            datetime(2025, 1, 2, 7, tzinfo=UTC),
+            datetime(2025, 1, 2, 4, tzinfo=UTC),
+            True,
+        ),
+        (
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+            datetime(2025, 1, 2, 7, tzinfo=UTC),
+            datetime(2025, 1, 2, 4, tzinfo=UTC),
+            True,
+        ),
+        (
+            datetime(2025, 1, 2, 8, 0, 29, tzinfo=UTC),
+            datetime(2025, 1, 2, 7, tzinfo=UTC),
+            datetime(2025, 1, 2, 4, tzinfo=UTC),
+            False,
+        ),
+        (
+            datetime(2025, 1, 2, 8, 0, 30, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+            True,
+        ),
+        (
+            datetime(2025, 1, 2, 8, 0, 31, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+            True,
+        ),
+    ],
+)
+def test_on_demand_respects_closed_candle_grace_for_one_and_four_hours(
+    observed_at: datetime,
+    hourly_close: datetime,
+    four_hour_close: datetime,
+    should_send: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert hourly_snapshot.on_demand_cutoffs(hourly_snapshot.ServerClock(observed_at)) == {
+        Timeframe.H1: hourly_close,
+        Timeframe.H4: four_hour_close,
+    }
+    snapshot = complete_snapshot(
+        observed_at, hourly_close=hourly_close, four_hour_close=four_hour_close
+    )
+    _, collector, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert (
+        hourly_snapshot.main(
+            ["--mode", "on-demand"],
+            lock_path=tmp_path / "hourly.lock",
+            monotonic=Mock(side_effect=[100.0, 100.0]),
+        )
+        == 0
+    )
+    assert collector.call_args.args[2] == observed_at
+    assert snapshot.assets[0].hourly[-1].close_time == hourly_close
+    assert snapshot.assets[0].four_hour[-1].close_time == four_hour_close
+    if should_send:
+        sender.assert_called_once()
+        assert_outcome(
+            capsys.readouterr().out,
+            "DELIVERED",
+            "telegram_accepted",
+            human="Hourly Telegram snapshot delivered.\n",
+        )
+    else:
+        sender.assert_not_called()
+        assert_outcome(
+            capsys.readouterr().out,
+            "SKIPPED",
+            "candle_boundary_transition",
+            phase="validation",
+            human=BOUNDARY_SKIP_HUMAN,
+        )
+
+
+def test_on_demand_rechecks_projected_clock_immediately_before_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=20)
+    snapshot = complete_snapshot(observed_at)
+    clocks, collector, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    monotonic = Mock(side_effect=[100.0, 105.0])
+    assert (
+        hourly_snapshot.main(
+            ["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock", monotonic=monotonic
+        )
+        == 0
+    )
+    assert monotonic.call_count == 2
+    assert clocks.call_count == 2
+    collector.assert_called_once()
+    sender.assert_called_once_with(format_telegram_snapshot(snapshot), CONFIG)
+    assert_outcome(
+        capsys.readouterr().out,
+        "DELIVERED",
+        "telegram_accepted",
+        human="Hourly Telegram snapshot delivered.\n",
+    )
+
+
+@pytest.mark.parametrize(
+    ("boundary", "hourly_close", "four_hour_close"),
+    [
+        (
+            datetime(2025, 1, 2, 9, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+        ),
+        (
+            datetime(2025, 1, 2, 12, tzinfo=UTC),
+            datetime(2025, 1, 2, 11, tzinfo=UTC),
+            datetime(2025, 1, 2, 8, tzinfo=UTC),
+        ),
+    ],
+)
+def test_on_demand_skips_if_monotonic_time_crosses_one_or_four_hour_grace(
+    boundary: datetime,
+    hourly_close: datetime,
+    four_hour_close: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed_at = boundary + timedelta(seconds=20)
+    snapshot = complete_snapshot(
+        observed_at, hourly_close=hourly_close, four_hour_close=four_hour_close
+    )
+    clocks, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert (
+        hourly_snapshot.main(
+            ["--mode", "on-demand"],
+            lock_path=tmp_path / "hourly.lock",
+            monotonic=Mock(side_effect=[100.0, 111.0]),
+        )
+        == 0
+    )
+    assert clocks.call_count == 2
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "candle_boundary_transition",
+        phase="validation",
+        human="Hourly snapshot skipped: latest closed candle boundary changed or is uncertain.\n",
+    )
+
+
+def test_on_demand_skips_inside_two_second_pre_post_margin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    boundary = datetime(2025, 1, 2, 12, tzinfo=UTC)
+    observed_at = boundary + timedelta(seconds=28)
+    snapshot = complete_snapshot(
+        observed_at,
+        hourly_close=datetime(2025, 1, 2, 11, tzinfo=UTC),
+        four_hour_close=datetime(2025, 1, 2, 8, tzinfo=UTC),
+    )
+    clocks, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert (
+        hourly_snapshot.main(
+            ["--mode", "on-demand"],
+            lock_path=tmp_path / "hourly.lock",
+            monotonic=Mock(side_effect=[100.0, 100.0]),
+        )
+        == 0
+    )
+    assert clocks.call_count == 2
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "candle_boundary_transition",
+        phase="validation",
+        human="Hourly snapshot skipped: latest closed candle boundary changed or is uncertain.\n",
+    )
+
+
+def test_on_demand_projection_rejects_ticker_that_ages_out_before_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=10)
+    clocks, _, _, sender = runner_mocks(
+        monkeypatch,
+        snapshot=complete_snapshot(observed_at),
+        first=observed_at,
+        final=observed_at,
+    )
+    assert (
+        hourly_snapshot.main(
+            ["--mode", "on-demand"],
+            lock_path=tmp_path / "hourly.lock",
+            monotonic=Mock(side_effect=[100.0, 401.0]),
+        )
+        == 1
+    )
+    assert clocks.call_count == 2
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "freshness_failure", phase="validation")
+
+
+def test_scheduled_mode_does_not_use_monotonic_projection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clocks, _, _, sender = runner_mocks(monkeypatch)
+    monotonic = Mock(side_effect=AssertionError("scheduled path must not use projection"))
+    assert hourly_snapshot.main([], lock_path=tmp_path / "hourly.lock", monotonic=monotonic) == 0
+    monotonic.assert_not_called()
+    assert clocks.call_count == 2
+    sender.assert_called_once()
+    assert_outcome(
+        capsys.readouterr().out,
+        "DELIVERED",
+        "telegram_accepted",
+        human="Hourly Telegram snapshot delivered.\n",
+    )
+
+
+@pytest.mark.parametrize("timeframe", [Timeframe.H1, Timeframe.H4])
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_on_demand_rejects_stale_or_future_candle(
+    timeframe: Timeframe,
+    direction: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=50)
+    snapshot = complete_snapshot(observed_at)
+    asset = snapshot.assets[0]
+    shifted = series(asset.symbol, timeframe, close_time=CLOSE + direction * timeframe.duration)
+    field = "hourly" if timeframe is Timeframe.H1 else "four_hour"
+    snapshot = replace_asset(snapshot, 0, replace(asset, **{field: shifted}))
+    _, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "freshness_failure", phase="validation")
+
+
+def test_on_demand_rejects_stale_ticker_at_pre_send_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = CLOSE + timedelta(minutes=50)
+    final = first + timedelta(minutes=6)
+    _, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=complete_snapshot(first), first=first, final=final
+    )
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "freshness_failure", phase="validation")
+
+
+def test_on_demand_rejects_one_misaligned_symbol(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=50)
+    snapshot = complete_snapshot(observed_at)
+    asset = snapshot.assets[2]
+    snapshot = replace_asset(
+        snapshot,
+        2,
+        replace(
+            asset,
+            four_hour=series(asset.symbol, Timeframe.H4, close_time=CLOSE - Timeframe.H4.duration),
+        ),
+    )
+    _, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "freshness_failure", phase="validation")
+
+
+def test_on_demand_rejects_future_ticker_timestamp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=50)
+    snapshot = complete_snapshot(observed_at)
+    asset = snapshot.assets[0]
+    snapshot = replace_asset(
+        snapshot,
+        0,
+        replace(asset, ticker=replace(asset.ticker, as_of=observed_at + timedelta(seconds=11))),
+    )
+    _, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "freshness_failure", phase="validation")
+
+
+def test_on_demand_rejects_future_snapshot_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=59, seconds=55)
+    snapshot = replace(
+        complete_snapshot(observed_at), reference_time=observed_at + timedelta(seconds=11)
+    )
+    _, _, _, sender = runner_mocks(
+        monkeypatch, snapshot=snapshot, first=observed_at, final=observed_at
+    )
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "freshness_failure", phase="validation")
+
+
+def test_on_demand_check_validates_without_telegram_config_or_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_at = CLOSE + timedelta(minutes=50)
+    clocks, collector, loader, sender = runner_mocks(
+        monkeypatch, snapshot=complete_snapshot(observed_at), first=observed_at, final=observed_at
+    )
+    assert (
+        hourly_snapshot.main(["--mode", "on-demand", "--check"], lock_path=tmp_path / "hourly.lock")
+        == 0
+    )
+    assert clocks.call_count == 2
+    collector.assert_called_once()
+    loader.assert_not_called()
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "check_only",
+        human="Hourly snapshot is eligible; no message sent.\n",
+    )
+
+
+@pytest.mark.parametrize("at", [CLOSE + timedelta(hours=1), CLOSE + timedelta(hours=4)])
+def test_on_demand_skips_if_latest_candle_advances_before_send(
+    at: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = at - timedelta(seconds=1)
+    final = at + timedelta(seconds=31)
+    snapshot = complete_snapshot(
+        first,
+        hourly_close=expected_cutoff(first, Timeframe.H1),
+        four_hour_close=expected_cutoff(first, Timeframe.H4),
+    )
+    clocks, _, _, sender = runner_mocks(monkeypatch, snapshot=snapshot, first=first, final=final)
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 0
+    assert clocks.call_count == 2
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "candle_boundary_transition",
+        phase="validation",
+        human="Hourly snapshot skipped: latest closed candle boundary changed or is uncertain.\n",
+    )
+
+
+def test_on_demand_skips_when_server_clock_uncertainty_straddles_grace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clocks, collector, loader, sender = runner_mocks(monkeypatch)
+    clocks.side_effect = [
+        hourly_snapshot.ServerClock(CLOSE + timedelta(seconds=28), timedelta(seconds=4))
+    ]
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 0
+    collector.assert_not_called()
+    loader.assert_not_called()
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "candle_boundary_transition",
+        phase="initial_clock",
+        human="Hourly snapshot skipped: latest closed candle boundary changed or is uncertain.\n",
+    )
+
+
+def test_on_demand_lock_contention_skips_before_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clocks, collector, _, sender = runner_mocks(monkeypatch)
+    lock = tmp_path / "hourly.lock"
+    with hourly_snapshot.hourly_lock(lock) as acquired:
+        assert acquired
+        assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=lock) == 0
+    clocks.assert_not_called()
+    collector.assert_not_called()
+    sender.assert_not_called()
+    assert_outcome(
+        capsys.readouterr().out,
+        "SKIPPED",
+        "lock_contended",
+        phase="lock",
+        human="Hourly snapshot skipped: another run is active.\n",
+    )
+
+
+def test_on_demand_rejects_server_clock_skew_without_collection_or_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real_fetch = hourly_snapshot.fetch_server_clock
+    _, collector, _, sender = runner_mocks(monkeypatch)
+    monkeypatch.setattr(
+        hourly_snapshot,
+        "fetch_server_clock",
+        lambda session, *, base_url: real_fetch(session, base_url=base_url, now=lambda: REFERENCE),
+    )
+    session = hourly_snapshot.requests.Session()
+    session.get.return_value.status_code = 200
+    session.get.return_value.json.return_value = {
+        "serverTime": int((REFERENCE - timedelta(minutes=1)).timestamp() * 1000)
+    }
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    collector.assert_not_called()
+    sender.assert_not_called()
+    assert_outcome(capsys.readouterr().out, "FAILED", "server_time_invalid", phase="initial_clock")
+
+
+def test_on_demand_pre_send_clock_failure_prevents_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, collector, _, sender = runner_mocks(monkeypatch)
+    clock = Mock(
+        side_effect=[
+            hourly_snapshot.ServerClock(REFERENCE),
+            hourly_snapshot.HourlySnapshotError(
+                "secret response", DiagnosticCode.SERVER_TIME_INVALID
+            ),
+        ]
+    )
+    monkeypatch.setattr(hourly_snapshot, "fetch_server_clock", clock)
+    assert hourly_snapshot.main(["--mode", "on-demand"], lock_path=tmp_path / "hourly.lock") == 1
+    collector.assert_called_once()
+    sender.assert_not_called()
+    output = capsys.readouterr()
+    assert_outcome(output.out, "FAILED", "server_time_invalid", phase="pre_send_clock")
+    assert "secret" not in output.out + output.err
+
+
+def test_unsupported_mode_is_rejected_before_any_requests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clocks, collector, loader, sender = runner_mocks(monkeypatch)
+    with pytest.raises(SystemExit) as caught:
+        hourly_snapshot.main(["--mode", "unsupported"], lock_path=tmp_path / "hourly.lock")
+    assert caught.value.code == 2
+    clocks.assert_not_called()
+    collector.assert_not_called()
+    loader.assert_not_called()
+    sender.assert_not_called()
 
 
 @pytest.mark.parametrize(

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import math
 import os
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,6 +43,8 @@ MAX_TIME_REQUEST = timedelta(seconds=5)
 MAX_LOCAL_SKEW = timedelta(seconds=30)
 MAX_TICKER_AGE_AT_SEND = timedelta(minutes=5)
 MAX_TICKER_FUTURE = timedelta(seconds=10)
+# Allow for the short validation-to-POST gap; a pause longer than this remains possible.
+ON_DEMAND_SEND_MARGIN = timedelta(seconds=2)
 MIN_INDICATOR_CANDLES = 50
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 DEFAULT_LOCK_PATH = (
@@ -64,6 +68,13 @@ class HourlySnapshotError(ValueError):
 
 class OutsideWindow(HourlySnapshotError):
     """The current hourly candle is outside the automatic delivery window."""
+
+
+class CandleBoundaryTransition(OutsideWindow):
+    """The latest safely closed candle changed or is uncertain during this run."""
+
+
+Mode = Literal["scheduled", "on-demand"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +148,22 @@ def eligible_close(clock: ServerClock) -> datetime:
     return close
 
 
-def validate_snapshot(snapshot: MarketSnapshot, clock: ServerClock) -> datetime:
+def on_demand_cutoffs(clock: ServerClock) -> dict[Timeframe, datetime]:
+    """Require unambiguous latest closed cutoffs despite clock response age."""
+    cutoffs: dict[Timeframe, datetime] = {}
+    for timeframe in (Timeframe.H1, Timeframe.H4):
+        cutoff = expected_cutoff(clock.now, timeframe)
+        if cutoff != expected_cutoff(clock.now + clock.uncertainty, timeframe):
+            raise CandleBoundaryTransition("Latest closed candle boundary is uncertain.")
+        cutoffs[timeframe] = cutoff
+    return cutoffs
+
+
+def validate_snapshot(
+    snapshot: MarketSnapshot, clock: ServerClock, *, mode: Mode = "scheduled"
+) -> datetime:
     """Require complete, aligned closed candles and fresh live tickers before send."""
-    close = eligible_close(clock)
+    close = eligible_close(clock) if mode == "scheduled" else None
     reference = snapshot.reference_time
     if reference.tzinfo is None or reference.utcoffset() != timedelta(0):
         raise HourlySnapshotError(
@@ -149,6 +173,12 @@ def validate_snapshot(snapshot: MarketSnapshot, clock: ServerClock) -> datetime:
         raise HourlySnapshotError(
             "Snapshot reference time is in the future.", DiagnosticCode.FRESHNESS_FAILURE
         )
+    current_cutoffs = on_demand_cutoffs(clock) if mode == "on-demand" else {}
+    if mode == "on-demand" and any(
+        expected_cutoff(reference, timeframe) != cutoff
+        for timeframe, cutoff in current_cutoffs.items()
+    ):
+        raise CandleBoundaryTransition("Latest closed candle boundary changed.")
     if len(snapshot.assets) != len(SYMBOLS) or {asset.symbol for asset in snapshot.assets} != set(
         SYMBOLS
     ):
@@ -192,9 +222,13 @@ def validate_snapshot(snapshot: MarketSnapshot, clock: ServerClock) -> datetime:
                 raise HourlySnapshotError(
                     "Snapshot closed-candle cutoff is invalid.", DiagnosticCode.FRESHNESS_FAILURE
                 )
-            if timeframe is Timeframe.H1 and series[-1].close_time != close:
+            if mode == "on-demand" and series[-1].close_time != current_cutoffs[timeframe]:
+                raise HourlySnapshotError(
+                    "Snapshot closed-candle cutoff is invalid.", DiagnosticCode.FRESHNESS_FAILURE
+                )
+            if mode == "scheduled" and timeframe is Timeframe.H1 and series[-1].close_time != close:
                 raise OutsideWindow("Snapshot hourly candle is no longer current.")
-    return close
+    return close if close is not None else current_cutoffs[Timeframe.H1]
 
 
 Phase = Literal["lock", "initial_clock", "collection", "pre_send_clock", "validation"]
@@ -211,6 +245,7 @@ class OutcomeReason(StrEnum):
     CHECK_ONLY = "check_only"
     LOCK_CONTENDED = "lock_contended"
     OUTSIDE_FRESHNESS_WINDOW = "outside_freshness_window"
+    CANDLE_BOUNDARY_TRANSITION = "candle_boundary_transition"
     TELEGRAM_CONFIG_FAILURE = "telegram_config_failure"
     TELEGRAM_DELIVERY_FAILURE = "telegram_delivery_failure"
 
@@ -269,7 +304,13 @@ def hourly_lock(path: Path) -> Iterator[bool]:
         os.close(descriptor)
 
 
-def _run(*, check: bool, lock_path: Path | None) -> RunOutcome:
+def _run(
+    *,
+    check: bool,
+    lock_path: Path | None,
+    mode: Mode = "scheduled",
+    monotonic: Callable[[], float] = time.monotonic,
+) -> RunOutcome:
     phase: Phase = "lock"
     try:
         with hourly_lock(lock_path or DEFAULT_LOCK_PATH) as acquired:
@@ -280,7 +321,10 @@ def _run(*, check: bool, lock_path: Path | None) -> RunOutcome:
                 phase = "initial_clock"
                 base_url = resolve_binance_base_url()
                 starting_clock = fetch_server_clock(session, base_url=base_url)
-                eligible_close(starting_clock)
+                if mode == "scheduled":
+                    eligible_close(starting_clock)
+                else:
+                    on_demand_cutoffs(starting_clock)
                 phase = "collection"
                 snapshot = collect_snapshot(
                     BinanceClient(session, base_url=base_url), SYMBOLS, starting_clock.now
@@ -288,14 +332,34 @@ def _run(*, check: bool, lock_path: Path | None) -> RunOutcome:
                 message = format_telegram_snapshot(snapshot)
                 config = None if check else load_config()
                 phase = "pre_send_clock"
+                clock_started = monotonic() if mode == "on-demand" and not check else None
                 final_clock = fetch_server_clock(session, base_url=base_url)
                 phase = "validation"
-                validate_snapshot(snapshot, final_clock)
+                validate_snapshot(snapshot, final_clock, mode=mode)
             if check:
                 print("Hourly snapshot is eligible; no message sent.")
                 return RunOutcome(OutcomeStatus.SKIPPED, OutcomeReason.CHECK_ONLY)
             assert config is not None
+            if mode == "on-demand":
+                assert clock_started is not None
+                elapsed = monotonic() - clock_started
+                if not math.isfinite(elapsed) or elapsed < 0:
+                    raise HourlySnapshotError("Monotonic clock is invalid.")
+                if elapsed >= Timeframe.H1.duration.total_seconds():
+                    raise CandleBoundaryTransition(
+                        "Latest closed candle boundary may have changed."
+                    )
+                # The sample occurred after clock_started. This upper-bounds its age,
+                # including the final GET and any pause before this check.
+                projected_age = max(elapsed, final_clock.uncertainty.total_seconds())
+                projected_clock = ServerClock(
+                    final_clock.now + timedelta(seconds=projected_age) + ON_DEMAND_SEND_MARGIN
+                )
+                validate_snapshot(snapshot, projected_clock, mode="on-demand")
             send_message(message, config)
+    except CandleBoundaryTransition:
+        print("Hourly snapshot skipped: latest closed candle boundary changed or is uncertain.")
+        return RunOutcome(OutcomeStatus.SKIPPED, OutcomeReason.CANDLE_BOUNDARY_TRANSITION, phase)
     except OutsideWindow as error:
         message = (
             "Snapshot hourly candle is no longer current."
@@ -329,11 +393,24 @@ def _run(*, check: bool, lock_path: Path | None) -> RunOutcome:
     return RunOutcome(OutcomeStatus.DELIVERED, OutcomeReason.TELEGRAM_ACCEPTED)
 
 
-def main(argv: Sequence[str] | None = None, *, lock_path: Path | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    lock_path: Path | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> int:
     parser = argparse.ArgumentParser(description="Send one eligible hourly Binance snapshot.")
     parser.add_argument("--check", action="store_true", help="validate without sending Telegram")
+    parser.add_argument(
+        "--mode",
+        choices=("scheduled", "on-demand"),
+        default="scheduled",
+        help="scheduled window or latest safely closed candles",
+    )
     arguments = parser.parse_args(argv)
-    outcome = _run(check=arguments.check, lock_path=lock_path)
+    outcome = _run(
+        check=arguments.check, lock_path=lock_path, mode=arguments.mode, monotonic=monotonic
+    )
     _report_outcome(outcome)
     return outcome.exit_code
 
