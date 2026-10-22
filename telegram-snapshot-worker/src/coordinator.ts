@@ -1,4 +1,5 @@
 import { dispatchSnapshot, type DispatchResult } from "./github.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import type { CoordinatorState, CoordinatorStorage, Env } from "./types.ts";
 import { classifyMessageAge } from "./webhook.ts";
 
@@ -9,13 +10,7 @@ const MAX_RECENT_UPDATES = 1_024;
 
 type UpdateState =
   "dispatching" | "accepted" | "rejected" | "unknown" | "cooldown";
-type Result =
-  | "duplicate"
-  | "cooldown"
-  | "capacity"
-  | "stale_message"
-  | "future_message"
-  | DispatchResult;
+type ReservationDecision = "duplicate" | "cooldown" | "capacity" | "dispatch";
 
 interface RecentUpdate {
   id: string;
@@ -36,7 +31,7 @@ async function reserve(
   storage: CoordinatorStorage,
   updateId: string,
   nowMs: number,
-): Promise<Result | "dispatch"> {
+): Promise<ReservationDecision> {
   return storage.transaction(async (transaction) => {
     const state =
       (await transaction.get<StoredState>(STATE_KEY)) ?? emptyState();
@@ -131,10 +126,22 @@ export class SnapshotCoordinator {
 
     const nowMs = this.clock();
     const initialAgeResult = classifyMessageAge(messageDateSeconds, nowMs);
-    if (initialAgeResult !== null)
+    if (initialAgeResult !== null) {
+      logDiagnostic({ stage: "durable_object", result: initialAgeResult });
       return Response.json({ status: initialAgeResult });
-    const decision = await reserve(this.context.storage, updateId, nowMs);
-    if (decision !== "dispatch") return Response.json({ status: decision });
+    }
+    let decision: ReservationDecision;
+    try {
+      decision = await reserve(this.context.storage, updateId, nowMs);
+    } catch (error) {
+      logDiagnostic({ stage: "durable_object", result: "reservation_error" });
+      throw error;
+    }
+    if (decision !== "dispatch") {
+      logDiagnostic({ stage: "durable_object", result: decision });
+      return Response.json({ status: decision });
+    }
+    logDiagnostic({ stage: "durable_object", result: "reserved" });
 
     // The durable reservation precedes the only GitHub POST attempt. An object
     // restart or webhook retry leaves dispatching/unknown in storage and will
@@ -146,8 +153,10 @@ export class SnapshotCoordinator {
     );
     // Keep the reservation and cooldown on a final-age skip: the same update
     // must never be replayed after a delayed storage operation.
-    if (finalAgeResult !== null)
+    if (finalAgeResult !== null) {
+      logDiagnostic({ stage: "durable_object", result: finalAgeResult });
       return Response.json({ status: finalAgeResult });
+    }
     const result = await dispatchSnapshot(
       this.env,
       dispatchNowMs,
@@ -157,6 +166,7 @@ export class SnapshotCoordinator {
       await recordResult(this.context.storage, updateId, result);
     } catch {
       // The reservation is still present; report uncertainty, never retry.
+      logDiagnostic({ stage: "durable_object", result: "result_record_error" });
       return Response.json({ status: "unknown" });
     }
     return Response.json({ status: result });

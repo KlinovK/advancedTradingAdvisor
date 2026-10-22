@@ -1,4 +1,5 @@
 import { SnapshotCoordinator } from "./coordinator.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import type { Env } from "./types.ts";
 import {
   classifyUpdate,
@@ -58,6 +59,7 @@ export async function handleWebhook(
     return Response.json({ status: "ignored", reason: decision.reason });
   }
 
+  logDiagnostic({ stage: "webhook", result: "eligible" });
   try {
     const stub = env.SNAPSHOT_COORDINATOR.getByName("telegram-snapshot-global");
     const result = await stub.fetch(
@@ -70,8 +72,17 @@ export async function handleWebhook(
         }),
       }),
     );
-    if (!result.ok) return Response.json({ status: "unknown" });
-    const payload: unknown = await result.json();
+    if (!result.ok) {
+      logDiagnostic({ stage: "durable_object", result: "response_error" });
+      return Response.json({ status: "unknown" });
+    }
+    let payload: unknown;
+    try {
+      payload = await result.json();
+    } catch {
+      logDiagnostic({ stage: "durable_object", result: "invalid_response" });
+      return Response.json({ status: "unknown" });
+    }
     if (
       typeof payload === "object" &&
       payload !== null &&
@@ -92,10 +103,12 @@ export async function handleWebhook(
       // eventual Telegram delivery. No Bot API acknowledgment is sent here.
       return Response.json({ status: payload.status });
     }
+    logDiagnostic({ stage: "durable_object", result: "invalid_response" });
     return Response.json({ status: "unknown" });
   } catch {
     // The Durable Object may have dispatched before this error; Telegram must
     // not retry an ambiguous request automatically.
+    logDiagnostic({ stage: "durable_object", result: "request_error" });
     return Response.json({ status: "unknown" });
   }
 }

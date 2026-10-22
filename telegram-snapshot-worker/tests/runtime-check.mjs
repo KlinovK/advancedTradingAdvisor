@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { createTestHarness } from "wrangler";
 
 // Local workerd integration check. It makes no GitHub or Telegram request.
@@ -80,8 +81,18 @@ const integrationHarness = createTestHarness({
   ],
 });
 
+const localHeaderServer = createServer((request, response) => {
+  response.setHeader("Content-Type", "application/json");
+  response.end(
+    JSON.stringify({ userAgent: request.headers["user-agent"] ?? null }),
+  );
+});
+
 try {
   await integrationHarness.listen();
+  await new Promise((resolve) =>
+    localHeaderServer.listen(0, "127.0.0.1", resolve),
+  );
   const worker = integrationHarness.getWorker();
   const update = (updateId) => ({
     update_id: updateId,
@@ -123,6 +134,59 @@ try {
   const sqliteResponse = await stub.fetch("https://internal/test/sqlite");
   assert.deepEqual(await sqliteResponse.json(), { available: true });
 
+  const constructionResponse = await stub.fetch(
+    "https://internal/test/request-construction",
+  );
+  assert.equal(constructionResponse.status, 200);
+  const construction = await constructionResponse.json();
+  assert.equal(construction.manual, "supported");
+  assert.equal(construction.error, "TypeError");
+  assert.equal(construction.defaultUserAgent, null);
+  console.log("Local workerd redirect:error construction:", construction.error);
+  console.log("Local workerd Request default User-Agent: absent");
+
+  const localTarget = `http://127.0.0.1:${localHeaderServer.address().port}/headers`;
+  const outboundResponse = await stub.fetch(
+    `https://internal/test/local-outbound-user-agent?target=${encodeURIComponent(localTarget)}`,
+  );
+  assert.equal(outboundResponse.status, 200);
+  const outboundHeaders = await outboundResponse.json();
+  console.log(
+    "Local workerd outbound default User-Agent:",
+    outboundHeaders.userAgent,
+  );
+  const explicitResponse = await stub.fetch(
+    `https://internal/test/local-outbound-user-agent?target=${encodeURIComponent(localTarget)}&explicit=1`,
+  );
+  assert.equal(explicitResponse.status, 200);
+  assert.deepEqual(await explicitResponse.json(), {
+    userAgent: "telegram-snapshot-dispatcher/1.0",
+  });
+  console.log("Local workerd outbound explicit User-Agent: PASS");
+
+  const redirectResponse = await stub.fetch(
+    "https://internal/test/redirect-dispatch",
+  );
+  assert.equal(redirectResponse.status, 200);
+  assert.deepEqual(await redirectResponse.json(), {
+    result: "unknown",
+    requests: 1,
+    requestMode: "manual",
+    userAgent: "telegram-snapshot-dispatcher/1.0",
+    credentialUsedForGithub: true,
+    credentialSentToUnexpectedDestination: false,
+    logsSafe: true,
+    events: [
+      {
+        event: "telegram_snapshot_dispatch",
+        stage: "github",
+        result: "http_unexpected",
+        github_http_status: 302,
+      },
+    ],
+  });
+  console.log("Local workerd redirect dispatch and credential isolation: PASS");
+
   await worker.evictDurableObject("SNAPSHOT_COORDINATOR", {
     name: "telegram-snapshot-global",
   });
@@ -131,4 +195,6 @@ try {
   console.log("Local SQLite Durable Object concurrency and restart: PASS");
 } finally {
   await integrationHarness.close();
+  localHeaderServer.closeAllConnections();
+  await new Promise((resolve) => localHeaderServer.close(resolve));
 }

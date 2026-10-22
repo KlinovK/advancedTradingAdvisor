@@ -22,7 +22,7 @@ function parsedConfig() {
   return config;
 }
 
-test("installed Wrangler supports explicit private URL and required-secret settings", () => {
+test("installed Wrangler supports explicit workers.dev and required-secret settings", () => {
   const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
   const properties = schema.definitions.RawConfig.properties;
   assert.equal(properties.workers_dev.type, "boolean");
@@ -50,12 +50,13 @@ test("production config declares only fixed, nonsecret vars and four required se
   }
 });
 
-test("production config has no public URL or route and preserves Durable Object schema", () => {
+test("production config preserves the workers.dev URL without extra routes and retains Durable Object schema", () => {
   const config = parsedConfig();
-  assert.equal(config.workers_dev, false);
+  assert.equal(config.workers_dev, true);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.routes, []);
   assert.equal(Object.hasOwn(config, "route"), false);
+  assert.equal(Object.hasOwn(config, "custom_domains"), false);
   assert.equal(Object.hasOwn(config, "triggers"), false);
   assert.deepEqual(config.durable_objects.bindings, [
     { name: "SNAPSHOT_COORDINATOR", class_name: "SnapshotCoordinator" },
