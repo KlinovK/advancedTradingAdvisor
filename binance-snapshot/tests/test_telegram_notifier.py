@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 import telegram_notifier
+from requests.adapters import BaseAdapter
 from telegram_notifier import (
     TelegramConfig,
     TelegramConfigError,
@@ -46,6 +47,29 @@ def response(status: int, payload: object) -> Mock:
     result.status_code = status
     result.json.return_value = payload
     return result
+
+
+class RecordingRedirectAdapter(BaseAdapter):
+    """Return a redirect locally and record every attempted destination."""
+
+    def __init__(self, status: int, location: str) -> None:
+        self.status = status
+        self.location = location
+        self.requests: list[requests.PreparedRequest] = []
+
+    def send(self, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+        self.requests.append(request)
+        result = requests.Response()
+        result.status_code = self.status
+        result.url = request.url
+        result.request = request
+        result.headers["Location"] = self.location
+        result.headers["X-Private"] = "private_redirect_header"
+        result._content = b"private_redirect_body"
+        return result
+
+    def close(self) -> None:
+        pass
 
 
 def test_valid_configuration_from_temporary_file(tmp_path: Path) -> None:
@@ -177,17 +201,68 @@ def test_successful_delivery_uses_https_plain_text_and_bounded_timeout() -> None
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data={"chat_id": CHAT_ID, "text": "offline alert"},
         timeout=(3.0, 10.0),
+        allow_redirects=False,
     )
 
 
-@pytest.mark.parametrize("status,payload", [(403, {"ok": False}), (200, {"ok": False})])
-def test_telegram_api_rejection_is_safe_and_not_retried(status: int, payload: object) -> None:
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_telegram_http_rejection_is_safe_and_not_retried(status: int) -> None:
     session = Mock(spec=requests.Session)
-    session.post.return_value = response(status, payload)
+    session.post.return_value = response(status, {"ok": False})
     with pytest.raises(TelegramDeliveryError, match="rejected") as caught:
         send_message("offline alert", TelegramConfig(TOKEN, CHAT_ID), session=session)
     assert TOKEN not in str(caught.value)
     assert CHAT_ID not in str(caught.value)
+    session.post.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirect_is_not_followed_or_logged(
+    status: int, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    destination = "https://untrusted.invalid/collect?secret=private_redirect_target"
+    adapter = RecordingRedirectAdapter(status, destination)
+    with requests.Session() as session:
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        with (
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(TelegramDeliveryError, match="rejected") as caught,
+        ):
+            send_message("offline alert", TelegramConfig(TOKEN, CHAT_ID), session=session)
+    assert len(adapter.requests) == 1
+    assert adapter.requests[0].url == f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    exposed = "".join(traceback.format_exception(caught.value)) + caplog.text
+    captured = capsys.readouterr()
+    exposed += captured.out + captured.err
+    for sensitive in (TOKEN, destination, "private_redirect_header", "private_redirect_body"):
+        assert sensitive not in exposed
+
+
+@pytest.mark.parametrize("payload", [{"ok": False, "description": "private_api_description"}, {}])
+def test_telegram_api_rejection_is_safe_and_not_retried(
+    payload: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = Mock(spec=requests.Session)
+    session.post.return_value = response(200, payload)
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(TelegramDeliveryError, match="rejected") as caught,
+    ):
+        send_message("offline alert", TelegramConfig(TOKEN, CHAT_ID), session=session)
+    assert TOKEN not in str(caught.value)
+    assert CHAT_ID not in str(caught.value)
+    assert "private_api_description" not in str(caught.value) + caplog.text
+    session.post.assert_called_once()
+
+
+def test_malformed_response_is_safe_and_not_retried() -> None:
+    session = Mock(spec=requests.Session)
+    session.post.return_value = response(200, {})
+    session.post.return_value.json.side_effect = ValueError("private_api_description")
+    with pytest.raises(TelegramDeliveryError, match="invalid response") as caught:
+        send_message("offline alert", TelegramConfig(TOKEN, CHAT_ID), session=session)
+    assert "private_api_description" not in "".join(traceback.format_exception(caught.value))
     session.post.assert_called_once()
 
 
@@ -203,10 +278,13 @@ def test_network_timeout_is_safe_and_not_retried() -> None:
 
 def test_network_failure_is_safe_and_not_retried() -> None:
     session = Mock(spec=requests.Session)
-    session.post.side_effect = requests.ConnectionError(f"request URL contained {TOKEN}")
+    sensitive_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    session.post.side_effect = requests.ConnectionError(f"request URL contained {sensitive_url}")
     with pytest.raises(TelegramDeliveryError, match="network request failed") as caught:
         send_message("offline alert", TelegramConfig(TOKEN, CHAT_ID), session=session)
-    assert TOKEN not in "".join(traceback.format_exception(caught.value))
+    exposed = "".join(traceback.format_exception(caught.value))
+    assert TOKEN not in exposed
+    assert sensitive_url not in exposed
     session.post.assert_called_once()
 
 

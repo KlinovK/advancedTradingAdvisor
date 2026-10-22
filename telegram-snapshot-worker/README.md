@@ -50,10 +50,11 @@ does not implement cross-run candle deduplication.
 repository, workflow, ref and 600-second cooldown are validated by the code;
 changing them requires a reviewed code change. The `SNAPSHOT_COORDINATOR`
 Durable Object binding and SQLite migration `v1` are in the same file.
-`workers_dev` and `preview_urls` are explicitly disabled, and `routes` is
-empty. There is no configured public webhook URL. Confirm these settings in
-the Cloudflare account before and after any future deployment; the local file
-alone cannot prove that an existing Worker has no older route or custom domain.
+`workers_dev` is explicitly enabled to preserve the existing
+`telegram-snapshot-dispatcher.kost9klinov.workers.dev` endpoint on future
+deployments to the correct Cloudflare account. `preview_urls` remains disabled
+and `routes` is empty; no custom domain is configured here. Confirm the
+account, endpoint, and any dashboard-managed routes before and after deployment.
 
 The four required Worker secrets are declared by name in `secrets.required`:
 
@@ -83,31 +84,33 @@ mocked network calls. Never put real values in
 
 ## Controlled deployment plan (not executed)
 
-Deployment and webhook activation require separate reviews and approvals:
+Future deployment and webhook changes require separate reviews and approvals:
 
 1. Verify the intended Cloudflare account identity, permissions, plan quotas,
    and access to SQLite-backed Durable Objects. Confirm the authorized account
-   is the one associated with the intended future route.
-2. Check whether `telegram-snapshot-dispatcher` already exists in that account.
-   If it does, establish ownership and inspect its current routes, custom
-   domains, `workers.dev` setting, preview/version URL setting, all existing
+   is the one associated with `kost9klinov.workers.dev`.
+2. Confirm `telegram-snapshot-dispatcher` exists in that account. Establish
+   ownership and inspect its current routes, custom domains, `workers.dev`
+   setting, preview/version URL setting, all existing
    secret binding names, other bindings, and deployments. **Stop** if deploying
    would overwrite an unreviewed Worker or retain unexpected bindings.
 3. Review `wrangler.jsonc` and the exact bundled artifact from the dry run.
-   Confirm `workers_dev: false`, `preview_urls: false`, `routes: []`, the fixed
+   Confirm `workers_dev: true`, `preview_urls: false`, `routes: []`, the fixed
    GitHub target, the `SNAPSHOT_COORDINATOR` binding, and SQLite migration `v1`.
-   Confirm that no pre-existing route or custom domain would remain attached.
-4. Create a private temporary directory **outside the repository** and outside
-   synced or backed-up folders. Set `umask 077`; use `mktemp -d` and verify the
-   directory is owner-only (`0700`). Prepare the four real values in a `.env`
+   Confirm that the intended `workers.dev` URL remains enabled and no additional
+   route or custom domain is attached.
+4. If secret provisioning is separately required, create a private temporary
+   directory **outside the repository** and outside synced or backed-up
+   folders. Set `umask 077`; use `mktemp -d` and verify the directory is
+   owner-only (`0700`). Prepare the four real values in a `.env`
    or JSON secrets file there, using a trusted editor or secret manager that
    does not leave backup or swap copies. Verify the file is owner-only (`0600`).
    The two allowed IDs must be the intended decimal Telegram IDs. Do not use
    `.dev.vars.example` values. Never type secret values into shell commands or
    arguments, and never print or log them. Passing only the private file path
    to Wrangler avoids putting the values in shell history.
-5. With no Telegram webhook configured and no public route, provision all four
-   bindings **together with the reviewed code** using the installed Wrangler's
+5. If provisioning secrets, supply all four bindings together with the
+   reviewed code using the installed Wrangler's
    `deploy --secrets-file <private absolute path>` option. First recheck the
    target account and Worker ownership. Review the complete intended binding
    set, including any pre-existing names: secrets omitted from `--secrets-file`
@@ -117,22 +120,22 @@ Deployment and webhook activation require separate reviews and approvals:
    exists. The `secrets.required` declaration makes missing names a deploy
    error; the request handler still fails closed on invalid values.
 6. Verify in Cloudflare that all four binding **names** exist, the Durable
-   Object and migration are present, and there is no `workers.dev`, preview
-   or version URL, route, or custom domain exposing this Worker. Do not print
-   or retrieve secret values. After successful provisioning and verification,
-   delete the temporary secrets file and directory. Deleting a file does not
-   guarantee erasure from SSD layers, snapshots, or backups; avoid those
-   locations and rotate credentials if exposure is suspected. Stop before
-   attaching any route or configuring Telegram's webhook.
+   Object and migration are present, and the existing `workers.dev` URL is
+   enabled while preview URLs remain disabled. Confirm no additional route or
+   custom domain is attached. Do not print or retrieve secret values. If a
+   temporary secrets file was used, delete it after verification. Deleting a
+   file does not guarantee erasure from SSD layers, snapshots, or backups;
+   avoid those locations and rotate credentials if exposure is suspected. Stop before
+   attaching another route or changing Telegram's webhook.
 
 Cloudflare ownership, quotas, existing routes, and deployment state cannot be
 verified by offline tests. A dry run does not create or activate a Worker.
 
-### Separate webhook activation gates
+### Separate webhook change gates
 
-Before any future webhook activation, verify bot ownership and inspect the
-existing Telegram webhook and any polling consumers. Confirm the allowed
-user/chat IDs, HTTPS route ownership, and matching webhook secret. Decide how
+Before any future webhook change or reactivation, verify bot ownership and
+inspect the existing Telegram webhook and any polling consumers. Confirm the allowed
+user/chat IDs, HTTPS endpoint ownership, and matching webhook secret. Decide how
 pending Telegram updates should be handled. Obtain explicit activation
 approval, perform one controlled test, and correlate the dispatch response,
 GitHub run, `SNAPSHOT_OUTCOME`, and resulting Telegram delivery. Do not infer
@@ -140,9 +143,10 @@ delivery from a GitHub HTTP 204 response.
 
 ### Rollback plan
 
-Remove or restore the Telegram webhook first to stop new commands, then remove
-the Worker's public route. Revoke the GitHub dispatch credential and disable
-only the on-demand GitHub workflow if dispatch must also stop. Leave the
+Remove or restore the Telegram webhook first to stop new commands, then
+disable the Worker's `workers.dev` URL only if taking the endpoint offline is
+intended. Revoke the GitHub dispatch credential and disable only the on-demand
+GitHub workflow if dispatch must also stop. Leave the
 independent scheduled hourly workflow untouched. Durable Object reservations
 and cooldown state persist after routing changes; reverting code does not
 automatically roll back SQLite migrations or erase state. Review migration
@@ -183,5 +187,6 @@ GitHub or Binance. Python component tests run separately from
   replace a pending scheduled job. The two jobs can send concurrently or send
   snapshots for the same candle. GitHub concurrency is not durable candle
   deduplication; the Worker limits only commands reaching this Durable Object.
-- A usable public webhook requires a separately reviewed HTTPS route and
-  Telegram webhook configuration. Neither is configured by this repository.
+- The existing `workers.dev` URL is public. Telegram webhook configuration is
+  managed outside this repository; offline checks cannot verify its current
+  destination or the Cloudflare account's live routing state.

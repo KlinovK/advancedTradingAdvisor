@@ -13,7 +13,14 @@ test("authorized private /snapshot dispatches once with fixed endpoint and Worke
     "https://api.github.com/repos/KlinovK/advancedTradingAdvisor/actions/workflows/binance-on-demand-snapshot.yml/dispatches",
   );
   assert.equal(rig.calls[0].init.method, "POST");
-  assert.equal(rig.calls[0].init.redirect, "error");
+  assert.equal(rig.calls[0].init.redirect, "manual");
+  assert.deepEqual(rig.calls[0].init.headers, {
+    Authorization: `Bearer ${rig.env.GITHUB_DISPATCH_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "telegram-snapshot-dispatcher/1.0",
+  });
   assert.deepEqual(JSON.parse(rig.calls[0].init.body), {
     ref: "main",
     inputs: { requested_at_utc: "2026-10-20T12:00:00Z" },
