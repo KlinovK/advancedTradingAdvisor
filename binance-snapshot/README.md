@@ -1,7 +1,14 @@
 # Binance Spot snapshot
 
 This standalone, read-only analyzer uses its own virtual environment. Its packages are
-declared here, independently of the parent trading advisor application.
+declared here, independently of the parent trading advisor application. The current
+report covers BTCUSDT, ETHUSDT, SOLUSDT, LINKUSDT, AAVEUSDT, and ONDOUSDT.
+It fetches public 24-hour tickers and aligned, fully closed 1H and 4H klines.
+EMA20/50, RSI14, ATR14, relative volume, and completed-candle returns use
+closed candles only; the separately labeled live ticker price is not used in
+those indicator calculations. The market-data collector can optionally fetch
+1D candles, but the current CLI and Telegram reports do not request or display
+1D analysis. ASTER is not in the supported snapshot symbol list.
 
 From `binance-snapshot/`, set up Python 3.13 and install runtime dependencies:
 
@@ -82,7 +89,7 @@ Read-only manual verification, including Binance public market data requests
 but no `.env` read or Telegram delivery:
 
 ```sh
-cd /Users/konstantinklinov/Developer/advancedTradingAdvisor/binance-snapshot
+cd /path/to/advancedTradingAdvisor/binance-snapshot
 .venv/bin/python hourly_snapshot.py --check
 ```
 
@@ -94,17 +101,29 @@ It loads Telegram configuration after collection. The notifier attempts one
 
 ### Prepare and install the LaunchAgent
 
-The checked-in template is
-`launchd/com.konstantinklinov.binance-snapshot.hourly.plist`. It uses the
-absolute `.venv/bin/python` and script paths above. Set up the virtual
-environment first using the commands at the top of this README. The template
-is prepared only; installing or activating it is a separate manual action:
+The checked-in
+`launchd/com.konstantinklinov.binance-snapshot.hourly.plist` contains
+workstation-specific absolute Python, script, and log paths. It is an example,
+not a portable configuration to install unchanged. Set up the virtual
+environment first. If you choose to run a local LaunchAgent, copy the plist to
+your own `~/Library/LaunchAgents/` and edit its `Label`, both
+`ProgramArguments`, and both log paths to values for your machine. Launchd
+requires executable and script paths that resolve locally; verify the edited
+copy before enabling it. Installing or activating it is a separate manual
+action:
 
 ```sh
 mkdir -p "$HOME/Library/LaunchAgents"
-cp /Users/konstantinklinov/Developer/advancedTradingAdvisor/binance-snapshot/launchd/com.konstantinklinov.binance-snapshot.hourly.plist "$HOME/Library/LaunchAgents/"
-plutil -lint "$HOME/Library/LaunchAgents/com.konstantinklinov.binance-snapshot.hourly.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.konstantinklinov.binance-snapshot.hourly.plist"
+cp launchd/com.konstantinklinov.binance-snapshot.hourly.plist \
+  "$HOME/Library/LaunchAgents/binance-snapshot-hourly.plist"
+```
+
+Edit the copied plist now. Confirm its Python executable, script, log paths,
+and label before using these separate commands:
+
+```sh
+plutil -lint "$HOME/Library/LaunchAgents/binance-snapshot-hourly.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/binance-snapshot-hourly.plist"
 ```
 
 It schedules at local minute 07 of every hour while the user is logged in. It
@@ -116,13 +135,15 @@ outside its 2–45 minute window. Hours missed while the Mac is powered off are
 not replayed. Local clock changes and time zone changes can affect the
 scheduled minute; the Binance clock and UTC candle checks determine eligibility.
 
-To inspect the agent and its local logs:
+To inspect the agent and its local logs, use the `Label`, `StandardOutPath`,
+and `StandardErrorPath` from your edited plist:
 
 ```sh
-launchctl print "gui/$(id -u)/com.konstantinklinov.binance-snapshot.hourly"
-tail -n 50 "$HOME/Library/Logs/binance-snapshot-hourly.out.log"
-tail -n 50 "$HOME/Library/Logs/binance-snapshot-hourly.err.log"
+launchctl print "gui/$(id -u)/YOUR_LAUNCHD_LABEL"
 ```
+
+Read only the log paths you configured in that plist; do not publish local
+logs containing private operational information.
 
 The runner logs only short delivery, skip, or failure statuses. It does not log
 credentials, Telegram response bodies, or token-bearing URLs. If it fails,
@@ -138,8 +159,8 @@ delivery such as a Telegram timeout.
 To remove the agent after installation:
 
 ```sh
-launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.konstantinklinov.binance-snapshot.hourly.plist"
-rm "$HOME/Library/LaunchAgents/com.konstantinklinov.binance-snapshot.hourly.plist"
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/binance-snapshot-hourly.plist"
+rm "$HOME/Library/LaunchAgents/binance-snapshot-hourly.plist"
 ```
 
 The lock file is under `~/Library/Application Support/binance-snapshot/`. It
@@ -153,8 +174,8 @@ affect delivery timing. No automatic trading occurs.
 
 ## GitHub Actions hourly delivery
 
-After publication to `main`, `.github/workflows/binance-hourly-scheduled.yml`
-runs a lightweight delivery job at HH:05 UTC each hour. It installs runtime
+The `.github/workflows/binance-hourly-scheduled.yml` definition schedules a
+lightweight delivery job at HH:05 UTC each hour. It installs runtime
 dependencies and runs `python hourly_snapshot.py` using
 `https://data-api.binance.vision`. Offline
 tests stay in the existing validation workflow, so they do not delay the
