@@ -91,6 +91,7 @@ def send_message(
             url,
             data={"chat_id": config.chat_id, "text": message},
             timeout=_TIMEOUT,
+            allow_redirects=False,
         )
     except requests.Timeout:
         failure = "Telegram request timed out; delivery is unknown."
