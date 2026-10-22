@@ -1,10 +1,12 @@
-# Telegram snapshot webhook dispatcher (prepared, inactive)
+# Telegram snapshot webhook dispatcher
 
 This Cloudflare Worker accepts one command: an authorized private Telegram
 `/snapshot` message. It coordinates requests in a SQLite-backed Durable Object
 and calls the fixed GitHub Actions `workflow_dispatch` endpoint. The existing
-Python analyzer and Telegram delivery remain in GitHub Actions. This project
-has **not** been deployed and no Telegram webhook has been configured.
+Python analyzer and Telegram delivery remain in GitHub Actions. The Worker and
+Telegram webhook were previously verified in production. This README does not
+assert the current deployed version or live routing state; inspect Cloudflare
+and Telegram before any operational change.
 
 ## Request path
 
@@ -44,17 +46,27 @@ retried. This at-most-once choice may lose a request. A new update after the
 cooldown may still produce a second snapshot for the same candle; this Worker
 does not implement cross-run candle deduplication.
 
+## Safe diagnostics
+
+Cloudflare logs use the fixed `telegram_snapshot_dispatch` event with a
+processing `stage` and allowlisted `result`. GitHub responses add the numeric
+HTTP status when available; a 403 may add an allowlisted error category, and
+request exceptions add an allowlisted exception category. The Worker does not
+log webhook payloads, Telegram identifiers, GitHub response bodies, token
+values, authorization headers, or exception messages. These events help locate
+a failure but do not prove that a GitHub Actions job or Telegram delivery ran.
+
 ## Configuration
 
 `wrangler.jsonc` contains only nonsecret values. The fixed GitHub owner,
 repository, workflow, ref and 600-second cooldown are validated by the code;
 changing them requires a reviewed code change. The `SNAPSHOT_COORDINATOR`
 Durable Object binding and SQLite migration `v1` are in the same file.
-`workers_dev` is explicitly enabled to preserve the existing
-`telegram-snapshot-dispatcher.kost9klinov.workers.dev` endpoint on future
-deployments to the correct Cloudflare account. `preview_urls` remains disabled
-and `routes` is empty; no custom domain is configured here. Confirm the
-account, endpoint, and any dashboard-managed routes before and after deployment.
+`workers_dev` is explicitly enabled to preserve the existing `workers.dev`
+endpoint on future deployments to the correct Cloudflare account.
+`preview_urls` remains disabled and `routes` is empty; no custom domain is
+configured here. Confirm the account, endpoint, and any dashboard-managed
+routes before and after deployment.
 
 The four required Worker secrets are declared by name in `secrets.required`:
 
@@ -73,7 +85,7 @@ binding is missing, malformed, or outside that range. Wrangler validates
 declared secret names during deployment; the Worker validates their values at
 request time.
 
-For a future local development environment, copy `.dev.vars.example` to
+For a local development environment, copy `.dev.vars.example` to
 `.dev.vars` and replace **all four dummy values** with private local test
 values. `.dev.vars`, `.env`, and their variants are ignored by Git. Use either
 `.dev.vars` or `.env` for local Wrangler development, not both. The example's
@@ -82,13 +94,16 @@ until they are replaced. Offline tests use separate dummy credentials and
 mocked network calls. Never put real values in
 `wrangler.jsonc`, Git, logs, command-line arguments, or this README.
 
-## Controlled deployment plan (not executed)
+## Deployment and webhook change checklist
+
+The Worker was previously deployed; this checklist is for a separately authorized
+future change. Following it is not part of the offline verification below.
 
 Future deployment and webhook changes require separate reviews and approvals:
 
 1. Verify the intended Cloudflare account identity, permissions, plan quotas,
-   and access to SQLite-backed Durable Objects. Confirm the authorized account
-   is the one associated with `kost9klinov.workers.dev`.
+   and access to SQLite-backed Durable Objects. Confirm that the account owns
+   the existing production `workers.dev` endpoint.
 2. Confirm `telegram-snapshot-dispatcher` exists in that account. Establish
    ownership and inspect its current routes, custom domains, `workers.dev`
    setting, preview/version URL setting, all existing

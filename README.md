@@ -1,4 +1,108 @@
-# advancedTradingAdvisor
+# Binance Market Analyzer & Telegram Snapshot Dispatcher
+
+This repository contains a read-only Binance Spot market analyzer and a
+Telegram reporting pipeline previously verified in production. It turns
+validated public market data into deterministic, structured snapshots for six
+USDT pairs: BTC, ETH, SOL, LINK, AAVE, and ONDO. Reports use fully closed 1H
+and 4H candles for EMA, RSI, ATR, relative volume, and completed-candle
+returns. Reports label the separate ticker price as live; it is not an input
+to those closed-candle indicators.
+The system reports market conditions but does not place orders or execute trades.
+
+The repository also contains the Advanced Trading Advisor application described
+below. Its portfolio state, analysis, optional OpenAI reasoning, and manual
+trade records are distinct from the deterministic Binance snapshot pipeline.
+Recording an externally executed trade does not submit an exchange order.
+
+## Architecture and production paths
+
+```text
+Scheduled: GitHub Actions (HH:05 UTC)
+  -> Python hourly snapshot -> Binance Spot public market-data GETs
+  -> validated report -> Telegram Bot API
+
+On demand: private Telegram /snapshot -> Cloudflare Worker webhook
+  -> SQLite-backed Durable Object reservation -> GitHub workflow_dispatch
+  -> Python on-demand snapshot -> Binance Spot public market-data GETs
+  -> validated report -> Telegram Bot API
+```
+
+The scheduled job is defined in
+[Binance hourly scheduled delivery](.github/workflows/binance-hourly-scheduled.yml).
+The Worker dispatches only
+[Binance on-demand snapshot delivery](.github/workflows/binance-on-demand-snapshot.yml),
+which validates the request age before invoking Python. Both paths use the
+[snapshot component](binance-snapshot/README.md); the
+[Worker documentation](telegram-snapshot-worker/README.md) covers the webhook
+and Durable Object. GitHub accepting a dispatch request does not prove that a
+job ran or that Telegram accepted a later message.
+
+## Engineering and operations
+
+| Area | Implemented approach |
+| --- | --- |
+| Analysis | Python 3.13, Binance Spot public REST data, Decimal calculations, closed-candle validation, and explicit unavailable results for insufficient indicator history. |
+| Automation | GitHub Actions schedules and a separate on-demand workflow; late scheduled runs can skip when the newest closed candle is outside the delivery window. |
+| Webhook | TypeScript Cloudflare Worker, secret-token check before body parsing, bounded input, configured private user/chat checks, and message-age validation. |
+| Coordination | SQLite-backed Durable Object with atomic reservation, 48-hour replay window, and 600-second cooldown. |
+| Delivery | Telegram Bot API with bounded timeouts, no automatic POST retry, and no HTTP redirect following. |
+| Verification | Offline Python and Node.js tests, Worker type and formatting checks, local workerd checks, and CI. |
+
+Worker secrets and Telegram delivery credentials are supplied through private
+runtime configuration, not tracked files. Structured Worker diagnostics use
+fixed result categories and GitHub HTTP status codes without logging tokens,
+Telegram identifiers, request bodies, or raw GitHub errors. Market-data
+validation fails closed on stale, inconsistent, or malformed data. These
+controls reduce risk but do not guarantee availability across Binance, GitHub,
+Cloudflare, and Telegram.
+
+### Run and verify locally
+
+From the repository root, install the advisor's development dependencies and
+run its offline tests with Python 3.13:
+
+```sh
+python3.13 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+```
+
+The snapshot component has a separate environment and offline tests; see its
+[setup and test commands](binance-snapshot/README.md). The Worker uses Node.js
+24+ and a committed package lockfile:
+
+```sh
+cd telegram-snapshot-worker
+npm ci
+npm test
+npm run check
+npm run format:check
+npm run runtime:check
+```
+
+The tests use local fixtures or mocked network calls. To print a real,
+read-only snapshot without Telegram delivery, run `snapshot.py` as described
+in the component README; that command needs access to Binance's public API.
+Telegram delivery requires separate private credentials and an explicit
+delivery command or an authorized workflow run. It is not a local smoke test.
+
+### Limits and project scope
+
+The implemented snapshot path supports the six pairs listed above and
+reports 1H/4H indicators. ASTER and 1D snapshot reporting are not implemented
+in this path. The broader advisor has separate market structure and optional
+AI-assisted reasoning features; technical indicators are not machine-learning
+predictions. No report guarantees a market outcome. GitHub schedules are best
+effort, and Telegram API acceptance does not establish that a recipient read a
+message. Persistent cross-run candle deduplication and fully locked Python
+dependencies remain future improvements.
+
+Development has been human-led with AI-assisted coding and review; the
+snapshot's runtime calculations remain deterministic and testable.
+
+## Advanced Trading Advisor application
 
 Phase 10: local Python 3.13 spot swing advisor with explicit protected core, reserve v2,
 1D/4H structure, closed-1H trigger confirmation, persistent trade setups, ranked capital
@@ -1034,7 +1138,7 @@ report cancellation, backup during an uncommitted writer, corruption, doctor exi
 legacy report compatibility. Manual reliability smoke uses only a temporary DB and static data;
 no live OpenAI call is required. Restore and automatic execution remain deferred.
 
-## Finite cloud dispatch (prepared, not activated)
+## Finite cloud dispatch (separately managed workflow)
 
 `advisor scheduler dispatch` is the one-invocation cloud entry point. It uses the existing
 `SchedulerPolicy.catchup(now)` and calls `Scheduler.once(scheduled_for=slot)` at most once.
@@ -1063,11 +1167,13 @@ authority. Existing stale RUNNING recovery reconciles durable completion or mark
 it does not reclaim/re-execute that slot. GitHub concurrency is only an outer guard, with
 `cancel-in-progress: false` to avoid interrupting analysis/delivery.
 
-`.github/workflows/advisor-scheduler.yml` has **only `workflow_dispatch`**, no automatic trigger.
-The eventual UTC cron is `10 */4 * * *`, but a separate authorized activation commit must add
-it after cutover. GitHub runner delays can exceed the catch-up window; no exact-time delivery
-guarantee is implied. The job uses Ubuntu, Python 3.13, `pip install .`, read-only repository
-permissions, and a 10-minute outer timeout. Timeout/crash recovery still uses existing leases.
+`.github/workflows/advisor-scheduler.yml` declares both `workflow_dispatch` and the UTC
+`10 */4 * * *` schedule. GitHub reported this workflow as manually disabled on
+2026-10-22; check its live state before any operational decision. Re-enabling it
+requires separate authorization and cutover review. GitHub runner delays can
+exceed the catch-up window; no exact-time delivery guarantee is implied. The
+job uses Ubuntu, Python 3.13, `pip install .`, read-only repository permissions,
+and a 10-minute outer timeout. Timeout/crash recovery still uses existing leases.
 
 Required GitHub Secrets (names only): `ADVISOR_DATABASE_URL`, `COINGECKO_API_KEY`,
 `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. They are scoped to the dispatch
