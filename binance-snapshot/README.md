@@ -14,7 +14,7 @@ From `binance-snapshot/`, set up Python 3.13 and install runtime dependencies:
 
 ```sh
 python3.13 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-production-py313.lock
 ```
 
 For optional Telegram delivery, put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
@@ -42,7 +42,7 @@ deployment location must be confirmed independently.
 To install test tools and run the offline regression suite:
 
 ```sh
-.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-development-py313.lock
 .venv/bin/python -m pytest -q tests
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .

@@ -11,13 +11,13 @@ dependencies = [
     "asyncpg>=0.30,<1",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
-    "python-dotenv>=1,<2",
+    "python-dotenv>=1.2.2,<2",
     "uvicorn>=0.30,<1",
 ]
 [project.scripts]
 advisor = "advanced_trading_advisor.cli.main:main"
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+dev = ["pytest>=9.0.3,<10", "ruff>=0.9,<1"]
 [tool.setuptools.packages.find]
 where = ["src"]
 [tool.pytest.ini_options]

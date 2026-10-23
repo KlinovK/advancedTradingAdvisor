@@ -127,7 +127,9 @@ jobs:
           python-version: "3.13"
 
       - name: Install analyzer runtime dependencies
-        run: python -m pip install -r requirements.txt
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          -r requirements-production-py313.lock
 
       - name: Validate Binance server time and hourly eligibility without delivery
         run: python hourly_snapshot.py --check
