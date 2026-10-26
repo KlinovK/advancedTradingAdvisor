@@ -59,7 +59,7 @@ def test_on_demand_workflow_is_manual_main_only_and_keeps_secrets_step_scoped() 
     delivery_steps = [
         step
         for step in job["steps"]
-        if step.get("run") == "python hourly_snapshot.py --mode on-demand"
+        if step.get("run") == ".venv/bin/python hourly_snapshot.py --mode on-demand"
     ]
     assert len(delivery_steps) == 1
     delivery = delivery_steps[0]

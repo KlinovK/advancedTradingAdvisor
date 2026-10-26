@@ -26,16 +26,19 @@ jobs:
           python-version: "3.13"
 
       - name: Install component dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-development-py313.lock
+          .venv/bin/python -m pip check
 
       - name: Run offline component tests
-        run: python -m pytest -q tests
+        run: .venv/bin/python -m pytest -q tests
 
       - name: Run component Ruff lint
-        run: ruff check .
+        run: .venv/bin/ruff check .
 
       - name: Check component Ruff formatting
-        run: ruff format --check .
+        run: .venv/bin/ruff format --check .
 
   deliver:
     needs: test
@@ -65,10 +68,13 @@ jobs:
           python-version: "3.13"
 
       - name: Install runtime dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-production-py313.lock
+          .venv/bin/python -m pip check
 
       - name: Deliver eligible hourly snapshot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BINANCE_SNAPSHOT_TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.BINANCE_SNAPSHOT_TELEGRAM_CHAT_ID }}
-        run: python hourly_snapshot.py
+        run: .venv/bin/python hourly_snapshot.py

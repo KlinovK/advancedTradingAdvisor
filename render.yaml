@@ -2,7 +2,11 @@ services:
   - type: web
     name: advanced-trading-advisor-http
     runtime: python
-    buildCommand: pip install .
+    buildCommand: >-
+      python -m pip install --force-reinstall --require-hashes --only-binary=:all:
+      -r requirements/root-production-py313.txt &&
+      python -m pip install --no-deps --no-build-isolation . &&
+      python -m pip check
     startCommand: python -m advanced_trading_advisor.http.serve
     healthCheckPath: /health
     envVars:

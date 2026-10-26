@@ -31,7 +31,9 @@ jobs:
       - name: Install application
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install .
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements/root-production-py313.txt
+          .venv/bin/python -m pip install --no-deps --no-build-isolation .
+          .venv/bin/python -m pip check
 
       - name: Dispatch at most one eligible slot
         env:

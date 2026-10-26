@@ -63,7 +63,8 @@ run its offline tests with Python 3.13:
 
 ```sh
 python3.13 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements/root-development-py313.txt
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
 .venv/bin/python -m pytest
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
@@ -110,7 +111,9 @@ deployment, bounded OpenAI reasoning, whole-plan validation, immutable history, 
 4H scheduling and outbound Telegram.
 Recommendation-only: no trades are executed and advice never changes confirmed balances.
 
-Install: `python3.13 -m venv .venv`, activate it, then `python -m pip install -e '.[dev]'`.
+Install: create a Python 3.13 virtual environment, install
+`requirements/root-development-py313.txt` with `--require-hashes --only-binary=:all:`,
+then install the local project with `pip install --no-deps --no-build-isolation -e .`.
 Run `advisor --help` or `python -m advanced_trading_advisor --help`.
 Verify with `python -m pytest`, `ruff check .`, and `ruff format --check .`.
 The same credential-free offline checks run on Ubuntu with Python 3.13 for pushes and pull requests;
@@ -201,7 +204,8 @@ process. The HTTP factory reads process environment only; it does not load `.env
 PostgreSQL during startup. It does not require CoinGecko, OpenAI, or Telegram configuration.
 
 For a later Render deployment, `render.yaml` defines **only** the ATA HTTP web service. Render's
-Python runtime uses `.python-version` (3.13); `pip install .` installs the project; and
+Python runtime uses `.python-version` (3.13). The build command installs the
+hash-locked root production dependencies and then the local project.
 `python -m advanced_trading_advisor.http.serve` binds `0.0.0.0:$PORT` after validating the assigned
 port. The Blueprint declares `ADVISOR_STORAGE_BACKEND=postgres` and prompts for the private
 `ADVISOR_DATABASE_URL` and `ADVISOR_API_TOKEN` values (`sync: false`); never commit either value.
@@ -1172,7 +1176,8 @@ it does not reclaim/re-execute that slot. GitHub concurrency is only an outer gu
 2026-10-22; check its live state before any operational decision. Re-enabling it
 requires separate authorization and cutover review. GitHub runner delays can
 exceed the catch-up window; no exact-time delivery guarantee is implied. The
-job uses Ubuntu, Python 3.13, `pip install .`, read-only repository permissions,
+job uses Ubuntu, Python 3.13, the hash-locked root production dependencies,
+read-only repository permissions,
 and a 10-minute outer timeout. Timeout/crash recovery still uses existing leases.
 
 Required GitHub Secrets (names only): `ADVISOR_DATABASE_URL`, `COINGECKO_API_KEY`,
@@ -1265,7 +1270,8 @@ mkdir -p ~/Developer
 mv ~/Desktop/advancedTradingAdvisor ~/Developer/advancedTradingAdvisor
 cd ~/Developer/advancedTradingAdvisor
 python3.13 -m venv --clear .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements/root-development-py313.txt
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
 ```
 
 The helper refuses `install`, `start`, and `restart` from a protected location before changing
