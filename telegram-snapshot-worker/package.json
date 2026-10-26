@@ -16,5 +16,10 @@
     "prettier": "^3.9.10",
     "typescript": "^5.9.0",
     "wrangler": "^4.0.0"
+  },
+  "overrides": {
+    "miniflare": {
+      "undici": "7.30.1"
+    }
   }
 }
