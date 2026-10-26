@@ -39,19 +39,20 @@ jobs:
           python-version: "3.13"
 
       - name: Install runtime dependencies
-        run: >-
-          python -m pip install --require-hashes --only-binary=:all:
-          -r requirements-production-py313.lock
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-production-py313.lock
+          .venv/bin/python -m pip check
 
       - name: Validate request age
         id: request_guard
         env:
           REQUESTED_AT_UTC: ${{ inputs.requested_at_utc }}
-        run: python validate_dispatch_request.py
+        run: .venv/bin/python validate_dispatch_request.py
 
       - name: Deliver on-demand snapshot
         if: ${{ steps.request_guard.outputs.should_run == 'true' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BINANCE_SNAPSHOT_TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.BINANCE_SNAPSHOT_TELEGRAM_CHAT_ID }}
-        run: python hourly_snapshot.py --mode on-demand
+        run: .venv/bin/python hourly_snapshot.py --mode on-demand
