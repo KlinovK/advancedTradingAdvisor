@@ -10,6 +10,14 @@ those indicator calculations. The market-data collector can optionally fetch
 1D candles, but the current CLI and Telegram reports do not request or display
 1D analysis. ASTER is not in the supported snapshot symbol list.
 
+This component is the currently used reporting path. GitHub Actions runs the
+[scheduled](../.github/workflows/binance-hourly-scheduled.yml) and
+[on-demand](../.github/workflows/binance-on-demand-snapshot.yml) jobs; the
+[Cloudflare Worker](../telegram-snapshot-worker/README.md) dispatches only the
+on-demand job after an authorized Telegram command. The optional macOS
+LaunchAgent described below schedules the same Python runner independently of
+GitHub Actions and may duplicate a report if both are active.
+
 From `binance-snapshot/`, set up Python 3.13 and install runtime dependencies:
 
 ```sh
