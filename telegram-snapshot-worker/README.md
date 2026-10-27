@@ -8,6 +8,13 @@ Telegram webhook were previously verified in production. This README does not
 assert the current deployed version or live routing state; inspect Cloudflare
 and Telegram before any operational change.
 
+The Worker is the on-demand entry point only. The
+[scheduled snapshot workflow](../.github/workflows/binance-hourly-scheduled.yml)
+runs independently; both paths use the
+[Binance Snapshot component](../binance-snapshot/README.md) for analysis and
+Telegram delivery. The planned portfolio Web Dashboard is a separate FastAPI
+and React application, not a Worker feature.
+
 ## Request path
 
 1. `POST /telegram/webhook` checks the Telegram secret-token header before

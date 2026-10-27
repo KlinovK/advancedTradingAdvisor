@@ -37,6 +37,29 @@ which validates the request age before invoking Python. Both paths use the
 and Durable Object. GitHub accepting a dispatch request does not prove that a
 job ran or that Telegram accepted a later message.
 
+### Runtime ownership and planned direction
+
+The Binance Snapshot is the currently used reporting application. GitHub
+Actions runs its scheduled and on-demand Python jobs; the Cloudflare Worker
+handles only the authenticated Telegram command and GitHub dispatch. Telegram
+delivery happens in the Python jobs, not in the Worker. The optional local
+snapshot LaunchAgent is a separate scheduler and must not run alongside another
+automatic delivery source without checking for duplicate reports.
+
+The Advanced Trading Advisor CLI, recommendation engine, FastAPI API, and
+optional OpenAI integration remain functional but are not in the owner's
+current workflow. The Advisor GitHub scheduler was disabled when checked on
+2026-10-27; its workflow and the optional local Advisor LaunchAgent remain in
+the repository. Verify their live state before using or changing either path.
+Dormant components are not assumed to be dead code.
+
+The **planned**, local-first portfolio product will reuse suitable FastAPI,
+portfolio-domain, and PostgreSQL code for a React and TypeScript Web Dashboard.
+It will account and value in USDT, with explicit conversion quotes where needed;
+USD, USDC, and USDT are not interchangeable. Optional AI services and native
+iOS and Android clients are later goals. These clients, the transaction ledger,
+and USDT valuation are not implemented yet. Trading execution remains disabled.
+
 ## Engineering and operations
 
 | Area | Implemented approach |
@@ -97,8 +120,7 @@ in this path. The broader advisor has separate market structure and optional
 AI-assisted reasoning features; technical indicators are not machine-learning
 predictions. No report guarantees a market outcome. GitHub schedules are best
 effort, and Telegram API acceptance does not establish that a recipient read a
-message. Persistent cross-run candle deduplication and fully locked Python
-dependencies remain future improvements.
+message. Persistent cross-run candle deduplication remains a future improvement.
 
 Development has been human-led with AI-assisted coding and review; the
 snapshot's runtime calculations remain deterministic and testable.
