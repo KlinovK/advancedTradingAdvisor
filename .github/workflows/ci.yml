@@ -39,6 +39,41 @@ jobs:
       - name: Check Ruff formatting
         run: .venv/bin/ruff format --check .
 
+  snapshot-offline-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: binance-snapshot
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create Snapshot development environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-development-py313.lock
+          .venv/bin/python -m pip check
+
+      - name: Run offline Snapshot tests
+        run: .venv/bin/python -m pytest -q tests
+
+      - name: Run Snapshot Ruff lint
+        run: .venv/bin/ruff check .
+
+      - name: Check Snapshot Ruff formatting
+        run: .venv/bin/ruff format --check .
+
   postgres-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 10
