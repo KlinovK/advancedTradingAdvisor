@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -18,6 +19,19 @@ from models import Candle, Ticker, Timeframe
 def isolate_binance_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep endpoint tests independent of the developer's shell configuration."""
     monkeypatch.delenv("BINANCE_API_BASE_URL", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def deny_network_connections(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catch accidental in-process network use; this is not a security sandbox."""
+
+    def blocked(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Snapshot tests must not open network connections")
+
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+    monkeypatch.setattr(socket.socket, "sendto", blocked)
 
 
 @pytest.fixture
