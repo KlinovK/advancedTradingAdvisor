@@ -292,7 +292,7 @@ class CLI:
                         if version >= 3:
                             latest = await storage.deliveries.latest()
                 else:
-                    await storage.initialize()
+                    await db.check_legacy_ready()
                     latest = await storage.deliveries.latest()
                 self.output(
                     f"Enabled: {'yes' if enabled else 'no'}\n"
@@ -318,7 +318,10 @@ class CLI:
                 return
             if storage.is_sqlite:
                 require(db.path.is_file(), "No local database; complete an analysis first.")
-            await storage.initialize()
+            if storage.is_sqlite:
+                await storage.initialize()
+            else:
+                await db.check_legacy_ready()
             runs = storage.analyses
             latest = await runs.latest_completed()
             require(latest is not None, "No completed analysis to deliver.")
@@ -359,7 +362,7 @@ class CLI:
                         if version >= 2:
                             previous = await storage.scheduler.latest()
                 else:
-                    await storage.initialize()
+                    await db.check_legacy_ready()
                     previous = await storage.scheduler.latest()
                 at = self.now()
                 self.output(
@@ -375,7 +378,10 @@ class CLI:
             if args.operation == "run":
                 require(settings.enabled, "Scheduler disabled; set SCHEDULER_ENABLED=true.")
             telegram_settings = TelegramSettings.from_environment()
-            await storage.initialize(create_parent=True)
+            if storage.is_sqlite:
+                await storage.initialize(create_parent=True)
+            else:
+                await db.check_legacy_ready()
             delivery = (
                 compose_delivery(
                     storage,
@@ -440,9 +446,12 @@ class CLI:
                 async with readonly(db.path) as connection:
                     await check_schema(connection)
             else:
-                await storage.initialize()
+                await db.check_legacy_ready()
         else:
-            await storage.initialize(create_parent=True)
+            if storage.is_sqlite or args.command == "setup":
+                await storage.initialize(create_parent=True)
+            else:
+                await db.check_legacy_ready()
         snapshots, runs = storage.snapshots, storage.analyses
         service = ConfirmedStateService(snapshots)
         current = await service.load_current()

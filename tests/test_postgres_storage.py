@@ -179,7 +179,7 @@ def test_process_environment_overrides_local_storage_dotenv(tmp_path, monkeypatc
 
 
 def test_postgres_schema_is_versioned_native_and_guarded():
-    assert POSTGRES_SCHEMA_VERSION == 3
+    assert POSTGRES_SCHEMA_VERSION == 4
     assert set(POSTGRES_COLUMNS) == {
         "schema_metadata",
         "portfolio_snapshots",
@@ -188,6 +188,9 @@ def test_postgres_schema_is_versioned_native_and_guarded():
         "analysis_runs",
         "scheduler_executions",
         "telegram_deliveries",
+        "financial_portfolios",
+        "financial_operations",
+        "financial_postings",
     }
     schema = "\n".join(
         statement for migration in POSTGRES_MIGRATIONS.values() for statement in migration
@@ -469,7 +472,7 @@ def test_isolated_postgres_schema_checks_and_cleanup(monkeypatch, failure):
     not TEST_POSTGRES_URL,
     reason="ADVISOR_TEST_POSTGRES_URL is not configured",
 )
-def test_postgres_v1_migrates_to_v3_and_preserves_canonical_state():
+def test_postgres_v1_migrates_to_v4_and_preserves_canonical_state():
     async def scenario():
         async with isolated_postgres_schema() as (connection, schema):
             assert await connection.fetchval("SELECT current_schema()") == schema
@@ -524,7 +527,7 @@ def test_postgres_v1_migrates_to_v3_and_preserves_canonical_state():
                 await connection.fetchval(
                     "SELECT version FROM schema_metadata WHERE singleton_id=1"
                 )
-                == 3
+                == 4
             )
             tables = {
                 row["table_name"]

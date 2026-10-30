@@ -294,7 +294,7 @@ def test_production_composition_requires_postgres_without_connecting(monkeypatch
         calls.append(settings)
 
         class Database:
-            async def check_ready(self):
+            async def check_legacy_ready(self):
                 raise AssertionError("Startup must not check database readiness.")
 
         class Bundle:

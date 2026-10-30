@@ -21,6 +21,7 @@ from advanced_trading_advisor.storage.migration import (
 )
 from advanced_trading_advisor.storage.postgres_database import PostgresDatabase
 from advanced_trading_advisor.storage.postgres_repositories import PORTFOLIO_LOCK
+from advanced_trading_advisor.storage.postgres_schema import POSTGRES_MIGRATIONS
 
 TEST_URL = os.environ.get("ADVISOR_TEST_POSTGRES_URL")
 pytestmark = [
@@ -57,6 +58,25 @@ def test_import_preserves_every_row_and_identical_rerun_is_noop(backup, monkeypa
                 raise AssertionError("Identical target must not be written")
 
             monkeypatch.setattr(migration, "insert_rows", forbidden)
+            assert await import_source(source, target, rehearsal=True) == "verified_noop"
+
+    asyncio.run(scenario())
+
+
+def test_existing_v3_target_remains_verifiable_and_upgrades_to_v4(backup):
+    async def scenario():
+        source = await load_source(backup)
+        async with isolated_target() as target:
+            async with target.transaction() as connection:
+                for version in (1, 2, 3):
+                    for statement in POSTGRES_MIGRATIONS[version]:
+                        await connection.execute(statement)
+                await connection.execute("INSERT INTO schema_metadata VALUES (1,3)")
+                await migration.insert_rows(connection, source.rows)
+            assert await verify_source(source, target) == "verified"
+            assert await import_source(source, target, rehearsal=True) == "verified_noop"
+            await target.initialize()
+            assert await verify_source(source, target) == "verified"
             assert await import_source(source, target, rehearsal=True) == "verified_noop"
 
     asyncio.run(scenario())

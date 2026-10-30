@@ -69,7 +69,7 @@ async def run(cli):
         storage = create_storage(storage_settings)
         async with storage.database.connection() as connection:
             async with connection.transaction(readonly=True):
-                await storage.database._validate_schema(connection)
+                await storage.database.validate_legacy_schema(connection)
         require(await storage.snapshots.get_current() is not None, "Confirmed portfolio required.")
         delivery = (
             compose_delivery(

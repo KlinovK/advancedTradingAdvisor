@@ -312,7 +312,7 @@ def test_cloud_cli_exits_safely_and_readiness_is_readonly(cloud_env, monkeypatch
         yield SimpleNamespace(transaction=transaction)
 
     storage = SimpleNamespace(
-        database=SimpleNamespace(connection=connection, _validate_schema=AsyncMock()),
+        database=SimpleNamespace(connection=connection, validate_legacy_schema=AsyncMock()),
         snapshots=SimpleNamespace(get_current=AsyncMock(return_value=object())),
         scheduler=None,
         analyses=None,
@@ -358,7 +358,7 @@ def test_cloud_cli_exits_safely_and_readiness_is_readonly(cloud_env, monkeypatch
     output = []
     assert main(["scheduler", "dispatch"], now=lambda: NOW, output=output.append) == code
     assert not any("sentinel" in text or "raw response" in text for text in output)
-    storage.database._validate_schema.assert_awaited_once()
+    storage.database.validate_legacy_schema.assert_awaited_once()
 
 
 def test_workflow_supports_production_schedule_manual_dispatch_and_secret_scoping():

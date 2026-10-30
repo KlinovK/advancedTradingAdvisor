@@ -1,9 +1,26 @@
-"""Versioned PostgreSQL schema equivalent to SQLite schema v3."""
+"""Versioned PostgreSQL schema; v4 adds the independent financial ledger."""
 
-POSTGRES_SCHEMA_VERSION = 3
+POSTGRES_SCHEMA_VERSION = 4
 
 POSTGRES_COLUMNS = {
     "schema_metadata": {"singleton_id", "version"},
+    "financial_portfolios": {"id", "last_sequence"},
+    "financial_operations": {
+        "portfolio_id",
+        "operation_id",
+        "sequence",
+        "operation_type",
+        "executed_at",
+        "recorded_at",
+        "asset",
+        "quantity",
+        "known_cost_usdt",
+        "incomplete_quantity",
+        "completeness",
+        "principal_usdt",
+        "proceeds_usdt",
+    },
+    "financial_postings": {"portfolio_id", "operation_id", "ordinal", "asset", "delta", "role"},
     "portfolio_snapshots": {
         "snapshot_id",
         "confirmed_at",
@@ -53,6 +70,59 @@ POSTGRES_COLUMNS = {
         "status",
         "attempt_count",
         "failure_category",
+    },
+}
+
+FINANCIAL_TABLES = frozenset({"financial_portfolios", "financial_operations", "financial_postings"})
+POSTGRES_LEGACY_COLUMNS = {
+    table: columns for table, columns in POSTGRES_COLUMNS.items() if table not in FINANCIAL_TABLES
+}
+FINANCIAL_REQUIRED_TRIGGERS = {
+    "financial_operations": frozenset(
+        {
+            "financial_operation_postings_complete",
+            "financial_operations_no_update",
+            "financial_operations_no_delete",
+            "financial_operations_no_truncate",
+        }
+    ),
+    "financial_postings": frozenset(
+        {
+            "financial_posting_complete",
+            "financial_postings_no_update",
+            "financial_postings_no_delete",
+            "financial_postings_no_truncate",
+        }
+    ),
+}
+
+# tgtype bits: ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16, TRUNCATE=32.
+# Each tuple is (event/timing/granularity, function, constraint, deferrable, initially deferred).
+FINANCIAL_TRIGGER_CONTRACT = {
+    ("financial_operations", "financial_operation_postings_complete"): (
+        5,
+        "financial_postings_complete",
+        True,
+        True,
+        True,
+    ),
+    ("financial_postings", "financial_posting_complete"): (
+        5,
+        "financial_postings_complete",
+        True,
+        True,
+        True,
+    ),
+    **{
+        (table, f"{table}_no_{action}"): (
+            trigger_type,
+            "advisor_immutable_record",
+            False,
+            False,
+            False,
+        )
+        for table in ("financial_operations", "financial_postings")
+        for action, trigger_type in (("update", 19), ("delete", 11), ("truncate", 34))
     },
 }
 
@@ -211,5 +281,172 @@ POSTGRES_MIGRATIONS = {
             FOR EACH ROW EXECUTE FUNCTION advisor_telegram_transition_guard()""",
         """CREATE TRIGGER telegram_no_delete BEFORE DELETE ON telegram_deliveries
             FOR EACH ROW EXECUTE FUNCTION advisor_immutable_record()""",
+    ),
+    4: (
+        """CREATE FUNCTION financial_decimal_valid(value NUMERIC) RETURNS BOOLEAN
+            LANGUAGE SQL IMMUTABLE STRICT AS $$
+            SELECT value <> 'NaN'::NUMERIC
+               AND value <> 'Infinity'::NUMERIC
+               AND value <> '-Infinity'::NUMERIC
+               AND abs(value) < 1e60::NUMERIC
+               AND scale(value) <= 24
+               AND length(regexp_replace(trim_scale(abs(value))::TEXT, '[^0-9]', '', 'g')) <= 60
+            $$""",
+        """CREATE TABLE financial_portfolios (
+            id UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'::UUID),
+            last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0))""",
+        """CREATE TABLE financial_operations (
+            portfolio_id UUID NOT NULL REFERENCES financial_portfolios(id),
+            operation_id UUID NOT NULL
+                CHECK (operation_id <> '00000000-0000-0000-0000-000000000000'::UUID),
+            sequence BIGINT NOT NULL CHECK (sequence > 0),
+            operation_type TEXT NOT NULL
+                CHECK (operation_type IN ('opening_balance', 'buy', 'sell')),
+            executed_at TIMESTAMPTZ NOT NULL,
+            recorded_at TIMESTAMPTZ NOT NULL
+                CHECK (isfinite(executed_at) AND isfinite(recorded_at)
+                    AND recorded_at >= executed_at),
+            asset TEXT NOT NULL CHECK (asset COLLATE "C" ~ '^[A-Z0-9][A-Z0-9._-]{0,19}$'),
+            quantity NUMERIC NOT NULL
+                CHECK (financial_decimal_valid(quantity) AND quantity > 0),
+            known_cost_usdt NUMERIC
+                CHECK (known_cost_usdt IS NULL OR
+                    (financial_decimal_valid(known_cost_usdt) AND known_cost_usdt >= 0)),
+            incomplete_quantity NUMERIC
+                CHECK (incomplete_quantity IS NULL OR
+                    (financial_decimal_valid(incomplete_quantity) AND incomplete_quantity >= 0)),
+            completeness TEXT CHECK (completeness IN ('complete', 'partial', 'unknown')),
+            principal_usdt NUMERIC
+                CHECK (principal_usdt IS NULL OR
+                    (financial_decimal_valid(principal_usdt) AND principal_usdt > 0)),
+            proceeds_usdt NUMERIC
+                CHECK (proceeds_usdt IS NULL OR
+                    (financial_decimal_valid(proceeds_usdt) AND proceeds_usdt > 0)),
+            PRIMARY KEY (portfolio_id, operation_id),
+            UNIQUE (portfolio_id, sequence),
+            CHECK (
+                (operation_type = 'opening_balance'
+                    AND principal_usdt IS NULL AND proceeds_usdt IS NULL
+                    AND incomplete_quantity IS NOT NULL AND completeness IS NOT NULL
+                    AND incomplete_quantity <= quantity
+                    AND (
+                        (completeness = 'complete' AND known_cost_usdt IS NOT NULL
+                            AND incomplete_quantity = 0)
+                        OR (completeness = 'unknown' AND known_cost_usdt IS NULL
+                            AND incomplete_quantity = quantity)
+                        OR (completeness = 'partial' AND known_cost_usdt IS NOT NULL
+                            AND incomplete_quantity > 0 AND incomplete_quantity < quantity)
+                    )
+                    AND (asset <> 'USDT' OR
+                        (completeness = 'complete' AND known_cost_usdt = quantity)))
+                OR (operation_type = 'buy' AND asset <> 'USDT'
+                    AND principal_usdt IS NOT NULL AND proceeds_usdt IS NULL
+                    AND known_cost_usdt IS NULL AND incomplete_quantity IS NULL
+                    AND completeness IS NULL)
+                OR (operation_type = 'sell' AND asset <> 'USDT'
+                    AND proceeds_usdt IS NOT NULL AND principal_usdt IS NULL
+                    AND known_cost_usdt IS NULL AND incomplete_quantity IS NULL
+                    AND completeness IS NULL)
+            ))""",
+        """CREATE INDEX financial_operations_replay_order
+            ON financial_operations(portfolio_id, executed_at, sequence)""",
+        """CREATE TABLE financial_postings (
+            portfolio_id UUID NOT NULL,
+            operation_id UUID NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+            asset TEXT NOT NULL CHECK (asset COLLATE "C" ~ '^[A-Z0-9][A-Z0-9._-]{0,19}$'),
+            delta NUMERIC NOT NULL
+                CHECK (financial_decimal_valid(delta) AND delta <> 0),
+            role TEXT NOT NULL CHECK (role IN ('opening', 'traded_asset', 'settlement')),
+            PRIMARY KEY (portfolio_id, operation_id, ordinal),
+            FOREIGN KEY (portfolio_id, operation_id)
+                REFERENCES financial_operations(portfolio_id, operation_id))""",
+        """CREATE FUNCTION financial_postings_complete() RETURNS TRIGGER
+            LANGUAGE plpgsql AS $$
+            DECLARE operation_row financial_operations%ROWTYPE;
+                    actual_count INTEGER;
+            BEGIN
+                SELECT * INTO operation_row FROM financial_operations
+                WHERE portfolio_id = NEW.portfolio_id AND operation_id = NEW.operation_id;
+                SELECT count(*) INTO actual_count FROM financial_postings
+                WHERE portfolio_id = NEW.portfolio_id AND operation_id = NEW.operation_id;
+                IF operation_row.operation_type = 'opening_balance' THEN
+                    IF actual_count <> 1 OR NOT EXISTS (
+                        SELECT 1 FROM financial_postings WHERE portfolio_id = NEW.portfolio_id
+                        AND operation_id = NEW.operation_id AND ordinal = 1
+                        AND asset = operation_row.asset AND delta = operation_row.quantity
+                        AND role = 'opening') THEN
+                        RAISE EXCEPTION 'Invalid financial postings';
+                    END IF;
+                ELSIF actual_count <> 2 OR NOT EXISTS (
+                    SELECT 1 FROM financial_postings WHERE portfolio_id = NEW.portfolio_id
+                    AND operation_id = NEW.operation_id AND ordinal = 1
+                    AND asset = operation_row.asset AND role = 'traded_asset'
+                    AND delta = CASE WHEN operation_row.operation_type = 'buy'
+                        THEN operation_row.quantity ELSE -operation_row.quantity END
+                ) OR NOT EXISTS (
+                    SELECT 1 FROM financial_postings WHERE portfolio_id = NEW.portfolio_id
+                    AND operation_id = NEW.operation_id AND ordinal = 2
+                    AND asset = 'USDT' AND role = 'settlement'
+                    AND delta = CASE WHEN operation_row.operation_type = 'buy'
+                        THEN -operation_row.principal_usdt ELSE operation_row.proceeds_usdt END
+                ) THEN
+                    RAISE EXCEPTION 'Invalid financial postings';
+                END IF;
+                RETURN NEW;
+            END $$""",
+        """CREATE CONSTRAINT TRIGGER financial_operation_postings_complete
+            AFTER INSERT ON financial_operations DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION financial_postings_complete()""",
+        """CREATE CONSTRAINT TRIGGER financial_posting_complete
+            AFTER INSERT ON financial_postings DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION financial_postings_complete()""",
+        """CREATE TRIGGER financial_operations_no_update BEFORE UPDATE ON financial_operations
+            FOR EACH ROW EXECUTE FUNCTION advisor_immutable_record()""",
+        """CREATE TRIGGER financial_operations_no_delete BEFORE DELETE ON financial_operations
+            FOR EACH ROW EXECUTE FUNCTION advisor_immutable_record()""",
+        """CREATE TRIGGER financial_operations_no_truncate BEFORE TRUNCATE ON financial_operations
+            FOR EACH STATEMENT EXECUTE FUNCTION advisor_immutable_record()""",
+        """CREATE TRIGGER financial_postings_no_update BEFORE UPDATE ON financial_postings
+            FOR EACH ROW EXECUTE FUNCTION advisor_immutable_record()""",
+        """CREATE TRIGGER financial_postings_no_delete BEFORE DELETE ON financial_postings
+            FOR EACH ROW EXECUTE FUNCTION advisor_immutable_record()""",
+        """CREATE TRIGGER financial_postings_no_truncate BEFORE TRUNCATE ON financial_postings
+            FOR EACH STATEMENT EXECUTE FUNCTION advisor_immutable_record()""",
+    ),
+}
+
+
+def _function_source(version: int, signature: str) -> str:
+    statement = next(
+        sql
+        for sql in POSTGRES_MIGRATIONS[version]
+        if sql.startswith(f"CREATE FUNCTION {signature} RETURNS ")
+    )
+    return " ".join(statement.split("AS $$", 1)[1].rsplit("$$", 1)[0].split())
+
+
+# Compare catalog source to the applied migration, ignoring irrelevant whitespace.
+FINANCIAL_FUNCTION_CONTRACT = {
+    "advisor_immutable_record": (
+        "plpgsql",
+        "trigger",
+        "v",
+        False,
+        _function_source(1, "advisor_immutable_record()"),
+    ),
+    "financial_decimal_valid": (
+        "sql",
+        "boolean",
+        "i",
+        True,
+        _function_source(4, "financial_decimal_valid(value NUMERIC)"),
+    ),
+    "financial_postings_complete": (
+        "plpgsql",
+        "trigger",
+        "v",
+        False,
+        _function_source(4, "financial_postings_complete()"),
     ),
 }
