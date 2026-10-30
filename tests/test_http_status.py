@@ -14,6 +14,8 @@ from advanced_trading_advisor.http import serve
 from advanced_trading_advisor.http.app import create_app
 from advanced_trading_advisor.storage.postgres_database import PostgresDatabase
 from advanced_trading_advisor.storage.postgres_schema import (
+    FINANCIAL_FUNCTION_CONTRACT,
+    FINANCIAL_TRIGGER_CONTRACT,
     POSTGRES_COLUMNS,
     POSTGRES_SCHEMA_VERSION,
 )
@@ -106,18 +108,48 @@ def test_postgres_readiness_checks_schema_in_read_only_transaction(monkeypatch, 
             events.append(("transaction", readonly))
             yield self
 
-        async def fetchval(self, query):
-            assert query.startswith("SELECT version FROM schema_metadata")
-            if version is None:
-                raise RuntimeError("schema_metadata absent; private connection detail")
-            return version
+        async def fetchval(self, query, *_args):
+            if query.startswith("SELECT version FROM schema_metadata"):
+                if version is None:
+                    raise RuntimeError("schema_metadata absent; private connection detail")
+                return version
+            assert "to_regprocedure" in query
+            return "present"
 
-        async def fetch(self, query):
-            assert "information_schema.columns" in query
+        async def fetch(self, query, *_args):
+            if "information_schema.columns" in query:
+                return [
+                    {"table_name": table, "column_name": column}
+                    for table, columns in POSTGRES_COLUMNS.items()
+                    for column in columns
+                ]
+            if "pg_trigger" in query:
+                return [
+                    {
+                        "table_name": table,
+                        "trigger_name": trigger,
+                        "enabled": "O",
+                        "tgtype": spec[0],
+                        "function_name": spec[1],
+                        "function_in_schema": True,
+                        "is_constraint": spec[2],
+                        "deferrable": spec[3],
+                        "initially_deferred": spec[4],
+                    }
+                    for (table, trigger), spec in FINANCIAL_TRIGGER_CONTRACT.items()
+                ]
+            assert "pg_proc" in query
             return [
-                {"table_name": table, "column_name": column}
-                for table, columns in POSTGRES_COLUMNS.items()
-                for column in columns
+                {
+                    "function_name": name,
+                    "language": spec[0],
+                    "return_type": spec[1],
+                    "volatility": spec[2],
+                    "strict": spec[3],
+                    "source": spec[4],
+                    "security_definer": False,
+                }
+                for name, spec in FINANCIAL_FUNCTION_CONTRACT.items()
             ]
 
     @asynccontextmanager
@@ -151,11 +183,43 @@ def test_readiness_has_a_finite_outer_timeout(monkeypatch):
     assert response.status_code == 503
 
 
+def test_legacy_readiness_accepts_v3_without_initializing(monkeypatch):
+    from advanced_trading_advisor.storage.postgres_schema import POSTGRES_LEGACY_COLUMNS
+
+    class Connection:
+        @asynccontextmanager
+        async def transaction(self, *, readonly=False):
+            assert readonly
+            yield self
+
+        async def fetchval(self, query, *_args):
+            return 3 if "schema_metadata" in query else None
+
+        async def fetch(self, query):
+            assert "information_schema.columns" in query
+            return [
+                {"table_name": table, "column_name": column}
+                for table, columns in POSTGRES_LEGACY_COLUMNS.items()
+                for column in columns
+            ]
+
+    @asynccontextmanager
+    async def connection(_self):
+        yield Connection()
+
+    monkeypatch.setattr(PostgresDatabase, "connection", connection)
+    response = request(
+        status_app(PostgresDatabase("postgresql://placeholder.invalid/test").check_legacy_ready),
+        "/ready",
+    )
+    assert response.status_code == 200
+
+
 def test_http_factory_validates_config_without_connecting_or_using_providers(monkeypatch):
     events = []
 
     class Database:
-        async def check_ready(self):
+        async def check_legacy_ready(self):
             events.append("ready")
 
         async def initialize(self):

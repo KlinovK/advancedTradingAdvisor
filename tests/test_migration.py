@@ -143,6 +143,9 @@ def backup(tmp_path):
 
 def test_manifest_determinism_exact_text_legacy_and_trigger_preservation(backup):
     source = asyncio.run(load_source(backup))
+    assert source.manifest.schema_version == 3
+    assert set(source.rows) == set(migration.COLUMNS)
+    assert set(source.rows).isdisjoint(migration.FINANCIAL_TABLES)
     shuffled = {t: list(reversed(rows)) for t, rows in source.rows.items()}
     assert build_manifest(shuffled) == source.manifest
     with sqlite3.connect(f"file:{backup}?mode=ro", uri=True) as connection:
@@ -336,15 +339,22 @@ def test_verification_uses_readonly_transaction_without_initialization(backup):
 
         async def fetch(self, query):
             if "information_schema.tables" in query:
-                return [{"table_name": t} for t in migration.COLUMNS]
+                return [{"table_name": t} for t in migration.POSTGRES_COLUMNS]
             if "information_schema.columns" in query:
                 return [
                     {"table_name": t, "column_name": c}
-                    for t, columns in migration.COLUMNS.items()
+                    for t, columns in migration.POSTGRES_COLUMNS.items()
                     for c in columns
                 ]
             table = query.split('"')[1]
             return source.rows[table]
+
+        async def fetchval(self, query):
+            if "schema_metadata" in query:
+                return migration.POSTGRES_SCHEMA_VERSION
+            if "count(*)" in query:
+                return 0
+            raise AssertionError("Unexpected target query")
 
     class Database:
         @asynccontextmanager

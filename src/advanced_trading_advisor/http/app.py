@@ -138,7 +138,7 @@ def create_app(
             storage = create_storage(storage_settings)
             snapshots = storage.snapshots
             if readiness_check is None:
-                readiness_check = storage.database.check_ready
+                readiness_check = storage.database.check_legacy_ready
             if analyses is None:
                 analyses = storage.analyses
         except (TypeError, ValueError):

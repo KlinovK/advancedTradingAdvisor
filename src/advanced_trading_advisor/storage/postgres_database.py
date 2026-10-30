@@ -8,7 +8,16 @@ from contextlib import asynccontextmanager
 from advanced_trading_advisor.domain.persistence import PersistenceError, SchemaVersionError
 from advanced_trading_advisor.domain.validation import require
 
-from .postgres_schema import POSTGRES_COLUMNS, POSTGRES_MIGRATIONS, POSTGRES_SCHEMA_VERSION
+from .postgres_schema import (
+    FINANCIAL_FUNCTION_CONTRACT,
+    FINANCIAL_REQUIRED_TRIGGERS,
+    FINANCIAL_TABLES,
+    FINANCIAL_TRIGGER_CONTRACT,
+    POSTGRES_COLUMNS,
+    POSTGRES_LEGACY_COLUMNS,
+    POSTGRES_MIGRATIONS,
+    POSTGRES_SCHEMA_VERSION,
+)
 
 SCHEMA_LOCK = 6_416_892_125_109_931_071
 READINESS_TIMEOUT_SECONDS = 15
@@ -129,11 +138,18 @@ class PostgresDatabase:
                 yield connection
 
     async def check_ready(self) -> None:
-        """Check connectivity and the current schema without changing durable state."""
+        """Check complete financial v4 readiness without changing durable state."""
         async with asyncio.timeout(READINESS_TIMEOUT_SECONDS):
             async with self.connection() as connection:
                 async with connection.transaction(readonly=True):
-                    await self._validate_schema(connection)
+                    await self.validate_financial_schema(connection)
+
+    async def check_legacy_ready(self) -> None:
+        """Read-only readiness for the existing Advisor tables at v3 or v4."""
+        async with asyncio.timeout(READINESS_TIMEOUT_SECONDS):
+            async with self.connection() as connection:
+                async with connection.transaction(readonly=True):
+                    await self.validate_legacy_schema(connection)
 
     async def initialize(self, *, create_parent: bool = False) -> None:
         require(type(create_parent) is bool, "Invalid parent-creation flag.")
@@ -172,7 +188,7 @@ class PostgresDatabase:
                         "UPDATE schema_metadata SET version=$1 WHERE singleton_id=1", target
                     )
 
-            await self._validate_schema(connection)
+            await self.validate_financial_schema(connection)
 
     @staticmethod
     async def _validate_schema(connection) -> None:
@@ -191,3 +207,94 @@ class PostgresDatabase:
         for table, expected in POSTGRES_COLUMNS.items():
             if actual.get(table) != expected:
                 raise SchemaVersionError("PostgreSQL tables do not match the declared schema.")
+
+    @staticmethod
+    async def validate_legacy_schema(connection) -> None:
+        version = await connection.fetchval(
+            "SELECT version FROM schema_metadata WHERE singleton_id=1"
+        )
+        if type(version) is not int or version not in (3, POSTGRES_SCHEMA_VERSION):
+            raise SchemaVersionError("Unsupported PostgreSQL schema version.")
+        if version == POSTGRES_SCHEMA_VERSION:
+            await PostgresDatabase.validate_financial_schema(connection)
+            return
+        rows = await connection.fetch(
+            """SELECT table_name, column_name FROM information_schema.columns
+               WHERE table_schema = current_schema()"""
+        )
+        actual: dict[str, set[str]] = {}
+        for row in rows:
+            actual.setdefault(row["table_name"], set()).add(row["column_name"])
+        if FINANCIAL_TABLES & actual.keys() or any(
+            actual.get(table) != expected for table, expected in POSTGRES_LEGACY_COLUMNS.items()
+        ):
+            raise SchemaVersionError("PostgreSQL legacy schema is incomplete.")
+        for signature in ("financial_decimal_valid(numeric)", "financial_postings_complete()"):
+            if await connection.fetchval("SELECT to_regprocedure($1)", signature):
+                raise SchemaVersionError("PostgreSQL schema version disagrees with its objects.")
+
+    @staticmethod
+    async def validate_financial_schema(connection) -> None:
+        """Require v4 shape and migration-defined immutable-ledger guards."""
+        await PostgresDatabase._validate_schema(connection)
+        rows = await connection.fetch(
+            """SELECT c.relname AS table_name, t.tgname AS trigger_name,
+                      t.tgenabled::text AS enabled, t.tgtype,
+                      p.proname AS function_name,
+                      (pn.nspname=current_schema()) AS function_in_schema,
+                      (t.tgconstraint <> 0) AS is_constraint,
+                      t.tgdeferrable AS deferrable, t.tginitdeferred AS initially_deferred
+               FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+               JOIN pg_namespace n ON n.oid=c.relnamespace
+               JOIN pg_proc p ON p.oid=t.tgfoid
+               JOIN pg_namespace pn ON pn.oid=p.pronamespace
+               WHERE n.nspname=current_schema() AND c.relname=ANY($1::text[])
+                 AND NOT t.tgisinternal""",
+            list(FINANCIAL_REQUIRED_TRIGGERS),
+        )
+        actual = {}
+        for row in rows:
+            actual[(row["table_name"], row["trigger_name"])] = row
+        if any(
+            (row := actual.get(key)) is None
+            or row["enabled"] not in ("O", "A")
+            or (
+                row["tgtype"],
+                row["function_name"],
+                row["is_constraint"],
+                row["deferrable"],
+                row["initially_deferred"],
+            )
+            != expected
+            or not row["function_in_schema"]
+            for key, expected in FINANCIAL_TRIGGER_CONTRACT.items()
+        ):
+            raise SchemaVersionError("PostgreSQL financial safeguards are incomplete.")
+        functions = await connection.fetch(
+            """SELECT p.proname AS function_name, l.lanname AS language,
+                      p.prorettype::regtype::text AS return_type,
+                      p.provolatile::text AS volatility,
+                      p.proisstrict AS strict, p.prosecdef AS security_definer,
+                      p.prosrc AS source
+               FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+               JOIN pg_language l ON l.oid=p.prolang
+               WHERE n.nspname=current_schema()
+                 AND p.oid IN (to_regprocedure('advisor_immutable_record()'),
+                               to_regprocedure('financial_decimal_valid(numeric)'),
+                               to_regprocedure('financial_postings_complete()'))"""
+        )
+        actual_functions = {row["function_name"]: row for row in functions}
+        if any(
+            (row := actual_functions.get(name)) is None
+            or (
+                row["language"],
+                row["return_type"],
+                row["volatility"],
+                row["strict"],
+                " ".join(row["source"].split()),
+            )
+            != expected
+            or row["security_definer"]
+            for name, expected in FINANCIAL_FUNCTION_CONTRACT.items()
+        ):
+            raise SchemaVersionError("PostgreSQL financial functions are incomplete.")

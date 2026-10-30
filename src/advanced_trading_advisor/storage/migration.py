@@ -37,7 +37,10 @@ TABLES = (
     "telegram_deliveries",
     "current_portfolio",
 )
-COLUMNS = {table: tuple(sorted(columns)) for table, columns in POSTGRES_COLUMNS.items()}
+# The backup format is SQLite v3. New PostgreSQL-only ledger tables are not
+# source tables and must never enter its stable manifest.
+COLUMNS = {table: tuple(sorted(POSTGRES_COLUMNS[table])) for table in (*TABLES, "schema_metadata")}
+FINANCIAL_TABLES = ("financial_portfolios", "financial_operations", "financial_postings")
 KEYS = dict(
     zip(
         TABLES,
@@ -252,7 +255,7 @@ def build_manifest(raw_rows):
     return MigrationManifest(
         1,
         1,
-        POSTGRES_SCHEMA_VERSION,
+        3,
         tables,
         {k: current[0][k] for k in ("snapshot_id", "revision")} if current else None,
         statuses,
@@ -298,7 +301,14 @@ async def target_tables(connection):
 
 
 async def read_target(connection):
-    demand(await target_tables(connection) == set(COLUMNS), "Target schema is incompatible.")
+    version = await connection.fetchval("SELECT version FROM schema_metadata WHERE singleton_id=1")
+    demand(version in (3, POSTGRES_SCHEMA_VERSION), "Target schema is incompatible.")
+    expected = (
+        {table: set(columns) for table, columns in COLUMNS.items()}
+        if version == 3
+        else POSTGRES_COLUMNS
+    )
+    demand(await target_tables(connection) == set(expected), "Target schema is incompatible.")
     columns = await connection.fetch(
         "SELECT table_name,column_name FROM information_schema.columns "
         "WHERE table_schema=current_schema()"
@@ -306,8 +316,18 @@ async def read_target(connection):
     actual = {}
     for row in columns:
         actual.setdefault(row["table_name"], set()).add(row["column_name"])
-    demand(actual == POSTGRES_COLUMNS, "Target schema is incompatible.")
-    return {t: [dict(r) for r in await connection.fetch(f'SELECT * FROM "{t}"')] for t in COLUMNS}
+    demand(actual == expected, "Target schema is incompatible.")
+    if version == POSTGRES_SCHEMA_VERSION:
+        for table in FINANCIAL_TABLES:
+            demand(
+                await connection.fetchval(f'SELECT count(*) FROM "{table}"') == 0,
+                "Target contains financial ledger state; legacy migration refused.",
+            )
+    rows = {t: [dict(r) for r in await connection.fetch(f'SELECT * FROM "{t}"')] for t in COLUMNS}
+    if version == POSTGRES_SCHEMA_VERSION:
+        # The manifest describes the SQLite v3 source, not the PostgreSQL schema version.
+        rows["schema_metadata"] = [{"singleton_id": 1, "version": 3}]
+    return rows
 
 
 async def insert_rows(connection, rows):
@@ -356,10 +376,16 @@ async def import_source(source, database, *, rehearsal=False):
             for migration in POSTGRES_MIGRATIONS.values():
                 for statement in migration:
                     await connection.execute(statement)
-            await connection.execute("INSERT INTO schema_metadata VALUES (1,3)")
-        demand(await target_tables(connection) == set(COLUMNS), "Target schema is incompatible.")
+            await connection.execute(
+                "INSERT INTO schema_metadata VALUES (1,$1)", POSTGRES_SCHEMA_VERSION
+            )
+        tables = await target_tables(connection)
+        demand(
+            tables in (set(COLUMNS), set(POSTGRES_COLUMNS)),
+            "Target schema is incompatible.",
+        )
         await connection.execute(
-            "LOCK TABLE " + ",".join(f'"{t}"' for t in COLUMNS) + " IN ACCESS EXCLUSIVE MODE"
+            "LOCK TABLE " + ",".join(f'"{t}"' for t in sorted(tables)) + " IN ACCESS EXCLUSIVE MODE"
         )
         target = await read_target(connection)
         existing = build_manifest(target)

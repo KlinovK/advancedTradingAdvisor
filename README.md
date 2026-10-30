@@ -57,8 +57,11 @@ The **planned**, local-first portfolio product will reuse suitable FastAPI,
 portfolio-domain, and PostgreSQL code for a React and TypeScript Web Dashboard.
 It will account and value in USDT, with explicit conversion quotes where needed;
 USD, USDC, and USDT are not interchangeable. Optional AI services and native
-iOS and Android clients are later goals. These clients, the transaction ledger,
-and USDT valuation are not implemented yet. Trading execution remains disabled.
+iOS and Android clients are later goals. The financial transaction ledger is
+implemented locally as a PostgreSQL repository but is not connected to existing
+HTTP endpoints or the Scheduler and requires complete PostgreSQL schema v4.
+The planned clients and portfolio-wide USDT
+valuation are not implemented yet. Trading execution remains disabled.
 
 ## Engineering and operations
 
@@ -235,15 +238,16 @@ Use Render's trusted HTTPS ingress, not a directly exposed plaintext HTTP listen
 Actions scheduler remains separate and continues to use `advisor scheduler dispatch`.
 
 `GET /health` is public process liveness and never accesses PostgreSQL. `GET /ready` is public,
-bounded, read-only database/schema readiness: it returns `200 {"status":"ready"}` only for the
-current PostgreSQL schema, or sanitized `503 {"status":"not_ready"}` otherwise. An initialized
+bounded, read-only database/schema readiness: it returns `200 {"status":"ready"}` for a
+complete legacy PostgreSQL schema v3 or complete schema v4, or sanitized
+`503 {"status":"not_ready"}` otherwise. An initialized
 schema without a portfolio is ready. Neither endpoint reveals credentials or prepares storage.
 
 **Database preparation is a separate operator action, not a deployment/startup hook.** Before
 first production use, prepare a clean PostgreSQL application database/schema, run the supported
 application-managed schema initialization through confirmed `advisor setup`, then confirm an
 initial portfolio before relying on HTTP portfolio reads or the scheduler. `setup` applies schema
-migrations v1–v3 and requires explicit `yes` before persisting the portfolio. There is no Alembic
+migrations v1–v4 and requires explicit `yes` before persisting the portfolio. There is no Alembic
 workflow or public setup/reset endpoint. Current `SnapshotCodec` accepts portfolio payload v4
 only; v1–v3 relational migrations do not transform old snapshot JSON. Do not point this service
 or scheduler at older cloud application data without a separately authorized compatibility check
@@ -470,8 +474,8 @@ then recurring scheduling. After the first PostgreSQL/cloud write, SQLite is sta
 re-enabling it is **not** a safe rollback. Stop cloud writers and reconcile/reverse-migrate
 new analysis, portfolio, scheduler, and delivery history before changing authority.
 
-Offline tests need no PostgreSQL. Disposable PostgreSQL 17 CI runs both storage and migration
-integration modules; locally these remain skipped without `ADVISOR_TEST_POSTGRES_URL`.
+Offline tests need no PostgreSQL. Disposable PostgreSQL 17 CI runs all tests marked
+`postgres_integration`; locally these remain skipped without `ADVISOR_TEST_POSTGRES_URL`.
 
 ## Persistence backends
 
@@ -581,8 +585,14 @@ foreign keys, immutability and independent run lifecycles.
 
 ### PostgreSQL infrastructure
 
-PostgreSQL schema metadata is also version 3. New empty schemas apply ordered v1→v3 migrations
-for portfolio/history, scheduler, then Telegram delivery storage. Relational identities use native
+PostgreSQL schema metadata is version 4. New empty schemas apply ordered v1→v4 migrations
+for portfolio/history, scheduler, Telegram delivery storage, then the independent financial
+ledger. Existing Advisor HTTP, Scheduler, and ordinary CLI operations accept validated v3 or
+v4 without migrating; financial repository operations require complete v4. Explicit
+initialization remains migration-capable and requires a planned backup. Readiness checks legacy
+tables and columns at v3; at v4 it also checks financial tables, enabled trigger semantics, and
+migration-defined function sources. A restricted runtime database role remains necessary.
+Relational identities use native
 UUID, indexed timestamps use `TIMESTAMPTZ`, and canonical versioned snapshot/update/result payloads
 remain `TEXT` so their exact encoding is preserved. Foreign keys, checks, uniqueness constraints,
 partial uniqueness for the single RUNNING analysis, and trigger guards protect immutable and
@@ -598,18 +608,19 @@ is replaced with a fixed storage error; a database URL is never written to repor
 Normal local tests and the `offline-tests` CI job remain credential-free and do not require
 PostgreSQL. A separate `postgres-integration` CI job starts a disposable PostgreSQL 17 service
 with fixed test-only credentials, exposes `ADVISOR_TEST_POSTGRES_URL` only to the integration-test
-step, and uploads no database artifacts. To run the same isolated contract locally against a
-dedicated disposable test database only:
+step, and uploads no database artifacts. To run the same isolated contract locally, provide a
+dedicated disposable PostgreSQL 17 test database with schema creation privileges and set its URL:
 
 ```sh
 ADVISOR_TEST_POSTGRES_URL='postgresql://test-only-url' \
-  .venv/bin/python -m pytest -m postgres_integration tests/test_postgres_storage.py
+  .venv/bin/python -m pytest -m postgres_integration tests
 ```
 
-The integration test creates a unique temporary schema and drops it afterward. It never falls
-back to `ADVISOR_DATABASE_URL`; do not point the dedicated test variable at production. Without
-that variable the test is explicitly skipped. Cloud PostgreSQL provisioning and migration of the
-existing local SQLite database are not implemented in this phase.
+The integration tests create unique temporary schemas and drop them afterward; the database
+itself must be disposable. They never fall back to `ADVISOR_DATABASE_URL`; do not point the
+dedicated test variable at production. Without that variable the tests are skipped. The financial
+ledger is not wired to the existing HTTP API, and production runtime database roles still need
+separate privilege verification.
 
 ## Market data and cutoff
 
@@ -864,7 +875,7 @@ the Phase 3 risk assessment, generates candidates, validates the whole plan, and
 persists/prints final recommendations. Each execution has a new run ID even for the same snapshot.
 Completion persists the effective cutoff in both run metadata and result. A candle closing during
 the fetch may follow run start, but never completion. Table payload codecs remain version 1;
-the current database schema is version 3.
+the SQLite schema remains v3, while the PostgreSQL schema is v4.
 
 Failures store only allowlisted categories and no result; cancellation is recorded as failed if
 storage remains available. If saving failure itself is impossible, CLI reports that explicitly.
