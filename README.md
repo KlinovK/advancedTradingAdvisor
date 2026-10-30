@@ -57,9 +57,10 @@ The **planned**, local-first portfolio product will reuse suitable FastAPI,
 portfolio-domain, and PostgreSQL code for a React and TypeScript Web Dashboard.
 It will account and value in USDT, with explicit conversion quotes where needed;
 USD, USDC, and USDT are not interchangeable. Optional AI services and native
-iOS and Android clients are later goals. The financial transaction ledger is
-implemented locally as a PostgreSQL repository but is not connected to existing
-HTTP endpoints or the Scheduler and requires complete PostgreSQL schema v4.
+iOS and Android clients are later goals. PostgreSQL financial ledger persistence
+is implemented and merged into `main`, but is not activated for production
+financial use or exposed through HTTP endpoints. It is not connected to the
+Scheduler and requires complete PostgreSQL schema v4.
 The planned clients and portfolio-wide USDT
 valuation are not implemented yet. Trading execution remains disabled.
 

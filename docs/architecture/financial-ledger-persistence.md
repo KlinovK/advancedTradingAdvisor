@@ -1,6 +1,6 @@
 # Financial ledger persistence contract (TG-7.5.5-1)
 
-Status: approved architecture decisions D1–D5; PostgreSQL schema v4, strict mapping, transactional repository, and separate legacy/financial readiness are implemented in the local working tree. This contract does not authorize deployment or change the existing snapshot portfolio. The financial repository is not connected to existing HTTP endpoints or the Advisor Scheduler.
+Status: approved architecture decisions D1–D5; PostgreSQL schema v4, strict mapping, transactional repository, and separate legacy/financial readiness are implemented and merged into `main`. Production financial ledger activation has not occurred. This contract does not authorize deployment or change the existing snapshot portfolio. The financial repository is not connected to existing HTTP endpoints or the Advisor Scheduler.
 
 ## Scope and boundaries
 
